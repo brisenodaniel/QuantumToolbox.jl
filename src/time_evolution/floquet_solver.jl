@@ -386,13 +386,13 @@ function state!(fb::FloquetBasis, t::TP, ::Val{false}=Val(false)) where {TP<:Rea
     return ψt_list
 end
 
-function state!(fb::FloquetBasis, t::TP; ::Val{true}) where {TP<:Real}
+function state!(fb::FloquetBasis, t::TP, ::Val{true}) where {TP<:Real}
     data
     _, Ut_mat = _state_list(fb, t, propagator!)
     return Ut_mat
 end
 
-function mode(fb::FloquetBasis, t::TP; ::Val{false}=Val(false)) where {TP<:Real}
+function mode(fb::FloquetBasis, t::TP, ::Val{false}=Val(false)) where {TP<:Real}
     data
     ψt_list, _ = _state_list(fb, t, propagator)
     phases = exp.(1im * t .* fb.equasi)
