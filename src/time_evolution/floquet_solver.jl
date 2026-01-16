@@ -27,45 +27,6 @@ struct FloquetEvolutionSol{
 end
 
 
-function _init_FloquetEvolutionSol(
-    fb::FloquetBasis,
-    tlist::AbstractVector{<:Real},
-    e_ops::Union{Nothing, AbstractVector, Tuple} = nothing,
-    kwargs...
-)
-    # determine if expectation values need to be calculated
-    has_eops = !(isnothing(e_ops) || isempty(e_ops))
-    # determine timesteps at which to store propagated state
-    nsteps = length(tlist)
-    if haskey(kwargs, :saveat)
-        # entry not checked by multiple dispatch, check if of correct type
-        if !(kwargs[:saveat] isa AbstractVector{<:Real})
-            throw(
-                TypeError(:fsesolve, "saveat", AbstractVector{<:Real}, typeof(kwargs[:saveat]))
-            )
-        end
-    elseif !has_eops
-        kwargs[:saveat] = tlist
-    else
-        kwargs[:saveat] = [tlist[end]]
-    end
-    nstates = length(kwargs[:saveat])
-
-    # determine whether expectation values must be collected
-    #  if so, determine size
-    n_eops = has_eops ? length(e_ops) : 0
-    # pre-allocate solution memory
-    sol = FloquetEvolutionSol(
-        tlist,
-        kwargs[:saveat],
-        Vector{QuantumObject{Ket}}(undef, nstates),
-        has_eops ? Array{ComplexF64}(undef, nsteps, n_eops) : nothing,
-        fb.alg,
-        fb.abstol,
-        fb.reltol
-    )
-    return sol
-end
 
 @doc raw"""
    struct FloquetBasis
@@ -153,6 +114,47 @@ struct FloquetBasis{
             kwargs,
         )
     end
+end
+
+
+function _init_FloquetEvolutionSol(
+    fb::FloquetBasis,
+    tlist::AbstractVector{<:Real},
+    e_ops::Union{Nothing, AbstractVector, Tuple} = nothing,
+    kwargs...
+)
+    # determine if expectation values need to be calculated
+    has_eops = !(isnothing(e_ops) || isempty(e_ops))
+    # determine timesteps at which to store propagated state
+    nsteps = length(tlist)
+    if haskey(kwargs, :saveat)
+        # entry not checked by multiple dispatch, check if of correct type
+        if !(kwargs[:saveat] isa AbstractVector{<:Real})
+            throw(
+                TypeError(:fsesolve, "saveat", AbstractVector{<:Real}, typeof(kwargs[:saveat]))
+            )
+        end
+    elseif !has_eops
+        kwargs[:saveat] = tlist
+    else
+        kwargs[:saveat] = [tlist[end]]
+    end
+    nstates = length(kwargs[:saveat])
+
+    # determine whether expectation values must be collected
+    #  if so, determine size
+    n_eops = has_eops ? length(e_ops) : 0
+    # pre-allocate solution memory
+    sol = FloquetEvolutionSol(
+        tlist,
+        kwargs[:saveat],
+        Vector{QuantumObject{Ket}}(undef, nstates),
+        has_eops ? Array{ComplexF64}(undef, nsteps, n_eops) : nothing,
+        fb.alg,
+        fb.abstol,
+        fb.reltol
+    )
+    return sol
 end
 
 @doc raw"""
@@ -366,38 +368,38 @@ function _state_list(fb::FloquetBasis, t::TP, pfunc::Function) where {TP<:Real}
 end
 
 
-function state(fb::FloquetBasis, t::TP=0, data::Val{false}=Val(false)) where {TP<:Real}
+function state(fb::FloquetBasis, t::TP, ::Val{false}=Val(false)) where {TP<:Real}
     data
     ψt_list, _ = _state_list(fb, t, propagator)
     return ψt_list
 end
 
-function state(fb::FloquetBasis, t::TP=0, data::Val{true}) where {TP<:Real}
+function state(fb::FloquetBasis, t::TP, ::Val{true}) where {TP<:Real}
     data
     _, Ut_mat = _state_list(fb, t, propagator)
     return Ut_mat
 end
 
-function state!(fb::FloquetBasis, t::TP=0, data::Val{false}=Val(false)) where {TP<:Real}
+function state!(fb::FloquetBasis, t::TP, ::Val{false}=Val(false)) where {TP<:Real}
     data
     ψt_list, _ = _state_list(fb, t, propagator!)
     return ψt_list
 end
 
-function state!(fb::FloquetBasis, t::TP=0, data::Val{true}) where {TP<:Real}
+function state!(fb::FloquetBasis, t::TP; ::Val{true}) where {TP<:Real}
     data
     _, Ut_mat = _state_list(fb, t, propagator!)
     return Ut_mat
 end
 
-function mode(fb::FloquetBasis, t::TP=0, data::Val{false}=Val(false)) where {TP<:Real}
+function mode(fb::FloquetBasis, t::TP; ::Val{false}=Val(false)) where {TP<:Real}
     data
     ψt_list, _ = _state_list(fb, t, propagator)
     phases = exp.(1im * t .* fb.equasi)
     return phases .* ψt_list
 end
 
-function mode(fb::FloquetBasis, t::TP=0, data::Val{true}) where {TP<:Real}
+function mode(fb::FloquetBasis, t::TP, ::Val{true}) where {TP<:Real}
     data
     _, Ut_mat = _state_list(fb, t, propagator)
     phases_mat = exp.(1im * t .* fb.equasi) |> Diagonal
@@ -405,19 +407,20 @@ function mode(fb::FloquetBasis, t::TP=0, data::Val{true}) where {TP<:Real}
 end
 
 
-function mode!(fb::FloquetBasis, t::TP=0, data::Val{false}=Val(false)) where {TP<:Real}
+function mode!(fb::FloquetBasis, t::TP, ::Val{false}=Val(false)) where {TP<:Real}
     data
     ψt_list, _ = _state_list(fb, t, propagator!)
     phases = exp.(1im * t .* fb.equasi)
     return phases .* ψt_list
 end
 
-function mode!(fb::FloquetBasis, t::TP=0, data::Val{true}) where {TP<:Real}
+function mode!(fb::FloquetBasis, t::TP, ::Val{true}) where {TP<:Real}
     data
     _, Ut_mat = _state_list(fb, t, propagator!)
     phases_mat = exp.(1im * t .* fb.equasi) |> Diagonal
     return phases_mat * Ut_mat
 end
+
 
 """
 TODO: mode, state, from_floquet_basis, to_floquet_basis
