@@ -114,7 +114,7 @@ struct FloquetBasis{
         U_T = pop!(Ulist)
         # solve for quasienergies
         period_phases = eigenenergies(U_T)
-        equasi = angle.(period_phases) ./ T
+        equasi = angle.(period_phases) ./ T |> sort
 
         new{typeof(tlist), typeof(equasi), typeof(Ulist), typeof(sol.abstol)}(
             H,
