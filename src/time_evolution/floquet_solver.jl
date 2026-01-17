@@ -1,5 +1,4 @@
 export FloquetBasis, FloquetEvolutionSol
-
 # script helper functions
 function _to_period_interval(tlist::AbstractVector, T::Real)
     # function maps all elements ``t`` in `tlist` outside the interval ``[0, T)`` to an equivalent
@@ -10,6 +9,18 @@ function _to_period_interval(tlist::AbstractVector, T::Real)
     return tlist
 end
 
+
+function qeye_like(A::QobjEvo, ::Val{true})
+    return (qeye_like ∘ A)(0)
+end
+
+function qeye_like(A::QobjEvo, ::Val{false})
+    return qeye_like(A)
+end
+
+function qeye_like(A::QuantumObject, ::Val{T}) where {T}
+    return qeye_like(A)
+end
 
 struct FloquetEvolutionSol{
     TT1<:AbstractVector{<:Real},
@@ -96,7 +107,9 @@ struct FloquetBasis{
         tlist = union(tlist, precompute) # ensure all times in precompute are in tlist
         # solve for propagators
         kwargs[:saveat] = precompute
-        sol = sesolve(H, qeye_like(H), tlist, alg=alg, kwargs=kwargs)
+
+        @bp
+        sol = sesolve(H, qeye_like(H, Val(true)), tlist; alg=alg, kwargs...)
         Ulist = sol.states
         U_T = pop!(Ulist)
         # solve for quasienergies
@@ -177,11 +190,12 @@ DOCSTRING
 """
 function FloquetBasis(
     H::AbstractQuantumObject,
-    T::TP,
+    T::TP;
     alg::AbstractODEAlgorithm = Vern7(lazy = false),
     kwargs::Dict=Dict()
     ) where {TP<:Real}
     precompute = Float64[]
+    @bp
     return FloquetBasis(H, T, precompute; alg=alg, kwargs=kwargs)
 end
 
@@ -192,7 +206,7 @@ function memoize_micromotion!(
     kwargs...
     )
     tlist = _to_period_interval(tlist, fb.T)
-    propagator!(fb, tlist, kwargs...)
+    propagator!(fb, tlist; kwargs...)
 end
 
 function memoize_micromotion!(fb::FloquetBasis, t::TP, U::QuantumObject{Operator}) where {TP<:Real}
@@ -216,7 +230,7 @@ function memoize_micromotion!(
 end
 
 function propagator(fb::FloquetBasis, t::TP; kwargs...) where {TP<:Real}
-    return propagator(fb, 0, t, kwargs...)
+    return propagator(fb, 0, t; kwargs...)
 end
 
 function propagator!(fb::FloquetBasis, t::TP; kwargs...) where {TP<:Real}
@@ -240,11 +254,11 @@ function propagator!(fb::FloquetBasis, t0::TP, tf::TP; kwargs) where{TP<:Real}
 end
 
 function _prop_list(fb::FloquetBasis, t0::TP, tf::TP; kwargs...) where {TP<:Real}
-    U0 = (t0 == 0) ? qeye_like(fb.H) : propagator(fb, 0, t0, kwargs...)
+    U0 = (t0 == 0) ? qeye_like(fb.H, Val(true)) : propagator(fb, 0, t0; kwargs...)
     nT, t_rem = fldmod(tf, fb.T)
     U_nT = fb.U_T^nT
     if t_rem == 0
-        U_intra = qeye_like(fb.H)
+        U_intra = qeye_like(fb.H, Val(true))
     elseif t_rem∈fb.precompute
         t_idx = findfirst(x->x==t_rem, fb.precompute)
         U_intra = fb.Ulist[t_idx]
@@ -260,7 +274,7 @@ function _prop_list(fb::FloquetBasis, t0::TP, tf::TP; kwargs...) where {TP<:Real
         end
         tlist = (0, t_rem)
         kwargs = Dict(fb.kwargs..., kwargs...)
-        U_intra = sesolve(fb.H, qeye_like(fb.H), tlist; alg=fb.alg, kwargs...).states[end]
+        U_intra = sesolve(fb.H, qeye_like(fb.H, Val(true)), tlist; alg=fb.alg, kwargs...).states[end]
     end
     return U0, U_nT, U_intra
 end
@@ -311,7 +325,7 @@ function _fsesolve(
     tlist::AbstractVector{TS},
     pfunc::Function,
     e_ops::Union{Nothing, AbstractVector, Tuple} = nothing,
-    progress_bar::Union{Val, Bool} = Val(true),
+    progress_bar::Union{Val, Bool} = Val(true);
     kwargs...,
 ) where {TS<:Real}
     sol = _init_FloquetEvolutionSol(
@@ -329,7 +343,7 @@ function _fsesolve(
     end
     for (step, t) in enumerate(tlist)
         if t==0
-            U = qeye_like(fb.H)
+            U = qeye_like(fb.H, Val(true))
         else
             U = pfunc(fb, 0, t; kwargs...)
         end

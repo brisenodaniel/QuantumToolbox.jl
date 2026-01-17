@@ -1,7 +1,11 @@
 module QuantumToolbox
 
-## Standard Julia libraries
+########## >>>>>>>>> REMOVE BEFORE PULL REQUEST >>>>>>>>>>>>>>>>>>
 using Revise
+using Debugger
+########## <<<<<<<< REMOVE BEFORE PULL REQUEST <<<<<<<<<<<<<<<<<<<
+
+## Standard Julia libraries
 using LinearAlgebra
 using SparseArrays
 
