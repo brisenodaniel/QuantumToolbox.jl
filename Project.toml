@@ -5,6 +5,7 @@ authors = ["Alberto Mercurio", "Yi-Te Huang"]
 
 [deps]
 ArrayInterface = "4fba245c-0d91-5ea0-9b3e-6abc04ee57a9"
+Debugger = "31a5f54b-26ea-5ae9-a837-f05ce5417438"
 DiffEqCallbacks = "459566f4-90b8-5000-8ac3-15dfb0a30def"
 DiffEqNoiseProcess = "77a26b50-5914-5dd7-bc55-306e6241c503"
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
@@ -47,6 +48,7 @@ QuantumToolboxMakieExt = "Makie"
 ArrayInterface = "6, 7"
 CUDA = "5.0 - 5.8, 5.9.4 - 5"
 ChainRulesCore = "1"
+Debugger = "0.7.16"
 DiffEqCallbacks = "4.2.1 - 4"
 DiffEqNoiseProcess = "5"
 Distributed = "1"
