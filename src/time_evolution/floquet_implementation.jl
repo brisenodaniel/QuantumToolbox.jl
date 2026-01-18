@@ -27,6 +27,7 @@ par1 = Params(1.0 * 2 * π, 0.2 * 2 * π, 2.5 * 2 * π, 1.0 * 2 * π)
 T = 2π / par1.ω
 floquet_basis = FloquetBasis(Hevo(par1),T)
 f_energies = floquet_basis.equasi
+#f_modes_1 = mode(floquet_basis, t = 0.1 * T)
 
 
 
@@ -34,14 +35,13 @@ f_energies = floquet_basis.equasi
 # Second box
 ω2 = 1.0 * 2 * π
 δ2 = 0.2 * 2 * π
-T = 2π / ω2
+T2 = 2π / ω2
 A_vec = range(0.0,10.0,100) * ω2
-tlist = range(0.0, 10*T, 101)
+tlist = range(0.0, 10*T2, 101)
 q_energies = zeros(length(A_vec),2)
 for (i,A_val) in enumerate(A_vec)
     par2 = Params(0.0 * 2 * π, δ2, A_val, ω2)
-    floquet_basis_n = FloquetBasis(Hevo(par2),T)
-    q_energies[i,:] = floquet_basis_n.equasi
+    q_energies[i,:] = FloquetBasis(Hevo(par2),T2).equasi
 end
 
 fig = Figure(size = (500, 350))
@@ -49,15 +49,15 @@ ax = Axis(fig[1,1], xlabel = L"A/$\omega$", ylabel = L"Quasienergy/$\Delta$", ti
 lines!(ax, A_vec ./ ω2, q_energies[:,1] ./ δ2, color = :blue)
 lines!(ax, A_vec ./ ω2, q_energies[:,2] ./ δ2, color = :red)
 
-fig
+fig |> display
     
 #Third box
+par2 = Params(1.0 * 2 * π, 0.2 * 2 * π, 0.5 * 2 * π, 1.0 * 2 * π)
+T3 = 2π / par2.ω
+tlist3 = range(0.0, 10*T3, 101) 
+psi0 = basis(2,1)
 
-
-
-
-
-
+floquet_basis3 = FloquetBasis(Hevo(par2),T3)
 
 
 

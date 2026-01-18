@@ -35,14 +35,15 @@ end
     H0 = num(N)
     H1 = a + a_d
     H_tuple = (H0,(H1,coef))
+    H_evo = QobjEvo(H_tuple)
     T = 2 * π
     tlist = range(0.0, 3T, length=101)
-    floquet_basis = FloquetBasis(H_tuple, T, tlist)
+    floquet_basis = FloquetBasis(H_evo, T, tlist)
     psi0 = rand_ket(N)
     floquet_psi0 = to_floquet_basis(floquet_basis, psi0)
     sol = sesolve(H_tuple, psi0, tlist, e_ops = [], saveat = tlist)
     states = sol.states
-    fse = floquet_sesolve(H_tuple, psi0, tlist, T=T)
+    fse = floquet_sesolve(floquet_basis, psi0, tlist, T=T)
     states_fse = fse.states
     for (t,state) in zip(tlist,states)
         from_floquet = from_floquet_basis(floquet_basis, floquet_psi0, t)

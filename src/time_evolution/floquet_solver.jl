@@ -1,4 +1,4 @@
-export FloquetBasis, FloquetEvolutionSol
+export FloquetBasis, FloquetEvolutionSol, propagator, state
 # script helper functions
 function _to_period_interval(tlist::AbstractVector, T::Real)
     # function maps all elements ``t`` in `tlist` outside the interval ``[0, T)`` to an equivalent
@@ -254,10 +254,10 @@ function propagator!(fb::FloquetBasis, t0::TP, tf::TP; kwargs) where{TP<:Real}
 end
 
 function _prop_list(fb::FloquetBasis, t0::TP, tf::TP; kwargs...) where {TP<:Real}
-    U0 = (t0 == 0) ? qeye_like(fb.H, Val(true)) : propagator(fb, 0, t0; kwargs...)
+    U0 = (t0 == zero(TP)) ? qeye_like(fb.H, Val(true)) : propagator(fb, zero(TP), t0; kwargs...)
     nT, t_rem = fldmod(tf, fb.T)
     U_nT = fb.U_T^nT
-    if t_rem == 0
+    if t_rem == zero(TP)
         U_intra = qeye_like(fb.H, Val(true))
     elseif t_rem∈fb.precompute
         t_idx = findfirst(x->x==t_rem, fb.precompute)
@@ -272,7 +272,7 @@ function _prop_list(fb::FloquetBasis, t0::TP, tf::TP; kwargs...) where {TP<:Real
                 )
             )
         end
-        tlist = (0, t_rem)
+        tlist = TP[0, t_rem]
         kwargs = Dict(fb.kwargs..., kwargs...)
         U_intra = sesolve(fb.H, qeye_like(fb.H, Val(true)), tlist; alg=fb.alg, kwargs...).states[end]
     end
@@ -436,6 +436,10 @@ function mode!(fb::FloquetBasis, t::TP, ::Val{true}) where {TP<:Real}
     phases_mat = exp.(1im * t .* fb.equasi) |> Diagonal
     return phases_mat * Ut_mat
 end
+
+
+
+
 
 
 """
