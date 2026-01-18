@@ -1,4 +1,4 @@
-export FloquetBasis, FloquetEvolutionSol, propagator, state
+export FloquetBasis, FloquetEvolutionSol, propagator, state, fsesolve
 # script helper functions
 function _to_period_interval(tlist::AbstractVector, T::Real)
     # function maps all elements ``t`` in `tlist` outside the interval ``[0, T)`` to an equivalent
