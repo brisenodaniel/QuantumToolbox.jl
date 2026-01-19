@@ -56,9 +56,9 @@ fig |> display
 par2 = Params(1.0 * 2 * π, 0.2 * 2 * π, 0.5 * 2 * π, 1.0 * 2 * π)
 T3 = 2π / par2.ω
 tlist3 = range(0.0, 10*T3, 101) 
-psi0 = basis(2,1)
+psi0 = basis(2,0)
 
-floquet_basis3 = FloquetBasis(Hevo(par2),T3)
+fb3 = FloquetBasis(Hevo(par2),T3)
 
 ## the functions below work only for vectors not for density matrices
 
