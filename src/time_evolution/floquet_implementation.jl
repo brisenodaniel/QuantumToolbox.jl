@@ -1,5 +1,6 @@
 # Replicate the plots in Qutip Floquet tutorial
 using CairoMakie
+using LinearAlgebra
 
 struct Params
     ϵ0::Float64
@@ -58,6 +59,34 @@ tlist3 = range(0.0, 10*T3, 101)
 psi0 = basis(2,1)
 
 floquet_basis3 = FloquetBasis(Hevo(par2),T3)
+
+## the functions below work only for vectors not for density matrices
+
+function floquet_mode(fb::FloquetBasis, t::Float64)
+    eigs = eigenstates(propagator(fb, 0.0, fb.T))
+    evecs_mat = eigs.vectors  
+    phases = Diagonal(exp.(-1im * t .* fb.equasi))
+    return propagator(fb, t, fb.T).data * evecs_mat * phases
+end
+
+function floquet_state(fb::FloquetBasis, t::Real; data::Bool=false)
+
+    mode_mat = floquet_mode(fb, t)
+    return Diagonal(exp.(-1im * t .* fb.equasi)) * mode_mat
+end
+
+function to_floquet_basis(
+    fb::FloquetBasis,
+    ψ::QuantumObject{Ket},
+    )
+return (floquet_state(fb, 0.0)' |> Qobj) * ψ
+end
+
+
+
+
+
+
 
 
 
