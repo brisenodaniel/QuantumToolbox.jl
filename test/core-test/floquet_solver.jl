@@ -1,6 +1,7 @@
 using QuantumToolbox
 using Test 
 using Random
+using CarioMakie
 
 function _matrix_element(c_op_fmmesolve::AbstractQuantumObject, vp::AbstractVector,ep::AbstractVector)
     return vp' * c_op_fmmesolve * ep
@@ -23,6 +24,22 @@ function _convert_c_ops(c_op_fmmesolve::AbstractQuantumObject, noise_spectrum::R
             end
         end
     end
+end
+
+@testitem "FloquetBasis" begin
+    σz, σx, σy = (sigmaz(), sigmax(), sigmay())
+    H0(;δ, ϵ0, kwargs...) = -(δ/2)*σx - (ϵ0/2)*σz
+    H1(;A, kwargs...) = (A/2) * σz
+    d(p, t) = cos(p.ω * t)
+
+    # box 1
+    b1_p = (ϵ0=2π, δ=0.2*2π, A=2.5*2π, ω=2π)
+    T_b1 = 2π/b1_p[:ω]
+    H_b1 = (H0(;b1_p...), (H1(;b1_p...), d)) |> QobjEvo
+    fb_b1 = FloquetBasis(H_b1, T_b1; params=b1_p)
+
+    f_energies = fb_b1.equasi
+
 end
 
 

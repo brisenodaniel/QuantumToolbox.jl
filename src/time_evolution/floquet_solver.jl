@@ -11,7 +11,8 @@ end
 
 
 function qeye_like(A::QobjEvo, ::Val{true})
-    return (qeye_like ∘ A)(0)
+    basis_dim = prod(A.dims)
+    return qeye(basis_dim, dims=A.dims)
 end
 
 function qeye_like(A::QobjEvo, ::Val{false})
@@ -54,22 +55,23 @@ Julia struct containing propagators, quasienergies, and Floquet states for a sys
 - `U_T::Qobj`: System propagator at time ``T``
 - `Ulist::AbstractVector{Qobj}`: List of micromotion propagators at times `tlist`
 - `equasi::TE`: Time-independent quasienergies
+- `params::AbstractVector` : Additional parameters for the time-dependent Hamiltonian to be used in sesolve.
 """
 struct FloquetBasis{
-    TT<:AbstractVector{<:Real},
-    TE<:AbstractVector{<:Real},
     TQ<:AbstractVector{<:AbstractQuantumObject},
-    TolT<:Real
+    TolT<:Real,
+    PP
 }
     H::AbstractQuantumObject
-    T::Real
-    precompute::TT
+    T::Float64
+    precompute::AbstractVector{Float64}
     U_T::Qobj
     Ulist::TQ
-    equasi::TE
+    equasi::AbstractVector{Float64}
     alg::AbstractODEAlgorithm
     abstol::TolT
     reltol::TolT
+    params::PP
     kwargs::Dict
 
     @doc raw"""
@@ -91,34 +93,42 @@ struct FloquetBasis{
         """
     function FloquetBasis(
         H::AbstractQuantumObject,
-        T::Real,
-        precompute::TL;
+        T::TP,
+        precompute::Union{AbstractVector{<:Real}, Nothing}=nothing;
+        params::PP=Nothing,
         alg::AbstractODEAlgorithm = Vern7(lazy = false),
         kwargs::Dict=Dict()
-        ) where {TL<:AbstractVector{<:Real}}
+        ) where {TP<:Real, PP}
         if T<=0
             throw(
                 ArgumentError("`T` must be a nonzero positive real number")
             )
         end
+        precompute = isnothing(precompute) ? Float64[] : Float64.(precompute)
         # enforce `precompute` interval rule
         precompute = _to_period_interval(precompute, T)
-        tlist = [0, precompute..., T] |> unique
+        tlist = Float64[0, precompute..., T] |> unique
         tlist = union(tlist, precompute) # ensure all times in precompute are in tlist
         # solve for propagators
         kwargs[:saveat] = precompute
 
-        @bp
-        sol = sesolve(H, qeye_like(H, Val(true)), tlist; alg=alg, kwargs...)
+        sol = sesolve(
+            H,
+            qeye_like(H, Val(true)),
+            tlist;
+            params=params,
+            alg=alg,
+            kwargs...
+                )
         Ulist = sol.states
         U_T = pop!(Ulist)
         # solve for quasienergies
         period_phases = eigenenergies(U_T)
         equasi = angle.(period_phases) ./ T |> sort
 
-        new{typeof(tlist), typeof(equasi), typeof(Ulist), typeof(sol.abstol)}(
+        new{ typeof(Ulist), typeof(sol.abstol), PP}(
             H,
-            T,
+            Float64(T),
             precompute,
             U_T,
             Ulist,
@@ -126,6 +136,7 @@ struct FloquetBasis{
             sol.alg,
             sol.abstol,
             sol.reltol,
+            params,
             kwargs,
         )
     end
@@ -188,16 +199,16 @@ DOCSTRING
 # Returns:
 - `fbasis::FloquetBasis`: Floquet basis object for the system evolving under the time-dependent Hamiltonian `H`.
 """
-function FloquetBasis(
-    H::AbstractQuantumObject,
-    T::TP;
-    alg::AbstractODEAlgorithm = Vern7(lazy = false),
-    kwargs::Dict=Dict()
-    ) where {TP<:Real}
-    precompute = Float64[]
-    @bp
-    return FloquetBasis(H, T, precompute; alg=alg, kwargs=kwargs)
-end
+#function FloquetBasis(
+#H::AbstractQuantumObject,
+#T::TP;
+#params::PP=nothing,
+#alg::AbstractODEAlgorithm = Vern7(lazy = false),
+#kwargs::Dict=Dict()
+#) where {TP<:Real, PP}
+#precompute = Float64[]
+#return FloquetBasis(H, T, precompute; params=params, alg=alg, kwargs=kwargs)
+#end
 
 
 function memoize_micromotion!(
@@ -233,8 +244,10 @@ function propagator(fb::FloquetBasis, t::TP; kwargs...) where {TP<:Real}
     return propagator(fb, 0, t; kwargs...)
 end
 
-function propagator!(fb::FloquetBasis, t::TP; kwargs...) where {TP<:Real}
-    return propagator!(fb, 0, t; kwargs...)
+#TODO: Change type signatures to allow for different numeric types in t0, tf
+
+function propagator!(fb::FloquetBasis, t::TI; kwargs...) where {TI<:Real}
+    return propagator!(fb, 0.0, Float64(t); kwargs...)
 end
 
 function propagator(fb::FloquetBasis, t0::TP, tf::TP; kwargs...) where {TP<:Real}
