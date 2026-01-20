@@ -250,12 +250,14 @@ function propagator!(fb::FloquetBasis, t::TI; kwargs...) where {TI<:Real}
     return propagator!(fb, 0.0, Float64(t); kwargs...)
 end
 
-function propagator(fb::FloquetBasis, t0::TP, tf::TP; kwargs...) where {TP<:Real}
+function propagator(fb::FloquetBasis, t0::TI, tf::TF; kwargs...) where {TI<:Real, TF<:Real}
+    t0, tf = Float64[t0, tf] # ensure timepoints are Float64
     U0, U_nT, U_intra = _prop_list(fb, t0, tf; kwargs...)
     return U_intra * U_nT * U0'
 end
 
-function propagator!(fb::FloquetBasis, t0::TP, tf::TP; kwargs) where{TP<:Real}
+function propagator!(fb::FloquetBasis, t0::TI, tf::TF; kwargs) where{TI<:Real, TF<:Real}
+    t0, tf = Float64[t0, tf] # ensure timepoints are Float64
     U0, U_nT, U_intra = _prop_list(fb, t0, tf; kwargs...)
     t0_T, tf_T = mod.([t0, tf], fb.T)
     for (tp, U) in [(t0_T, U0), (tf_T, U_intra)]
@@ -266,7 +268,7 @@ function propagator!(fb::FloquetBasis, t0::TP, tf::TP; kwargs) where{TP<:Real}
     return U_intra * U_nT * U0'
 end
 
-function _prop_list(fb::FloquetBasis, t0::TP, tf::TP; kwargs...) where {TP<:Real}
+function _prop_list(fb::FloquetBasis, t0::Float64, tf::Float64; kwargs...) where {TP<:Real}
     U0 = (t0 == zero(TP)) ? qeye_like(fb.H, Val(true)) : propagator(fb, zero(TP), t0; kwargs...)
     nT, t_rem = fldmod(tf, fb.T)
     U_nT = fb.U_T^nT
@@ -376,84 +378,106 @@ function _fsesolve(
     return sol
 end
 
-function _state_list(fb::FloquetBasis)
-    phases = exp.( fb.T * 1im .* fb.equasi) |>
-        Diagonal |>
-        x -> Qobj(x, dims=fb.U_T.dims)
-    U = phases * fb.U_T
-    _, ψ0, U0 = eigenstates(U)
-    return ψ0, U0.data
+
+###### State and Mode helper functions
+
+function _data_to_ketlist(Op::AbstractQuantumObject, M::AbstractMatrix)
+    M_list = eachcol(M) |> collect
+    ψ_list = Qobj.(M_list, dims=Op.dims)
+    return ψ_list
 end
 
-function _state_list(fb::FloquetBasis, t::TP, pfunc::Function) where {TP<:Real}
-    if t==0
-        return _state_list(fb)
+function _state_mtrx_to_mode(equasi::AbstractVector{Float64}, M::AbstractMatrix, t::Float64)
+    ϕ_mat = exp.(1im * t .* equasi) |> Diagonal
+    return ϕ_mat * M
+end
+
+######## Get  modes at time 0
+
+function modes(fb::FloquetBasis, ::Val{true})
+    _, _, U0 = eigenstates(fb.U_T)
+    return _state_mtrx_to_mode(fb.equasi, U0.data, fb.T)
+end
+
+function modes(fb::FloquetBasis, ::Val{false}=Val(false))
+    return mode(fb, Val(true)) |> x -> _data_to_ketlist(fb.U_T, x)
+end
+
+# at t=0, state function is alias for modes function, since the Floquet
+# state and modes conicide at t=0
+function states(fb::FloquetBasis, ::Val{true})
+    return mode(fb, Val(true))
+end
+
+function states(fb::FloquetBasis, ::Val{false}=Val(false))
+    return mode(fb, Val(false))
+end
+
+######## Get States and Modes at t>0
+## No side-effects
+
+function _states(fb::FloquetBasis, t::TP, pfunc::Function) where {TP<:Real}
+    _, _, U0 = modes(fb, Val(true))
+    if t == zero(t)
+        return U0
+    else
+        Ut = pfunc(fb, t).data
+        return Ut * U0
     end
-    _, ψ0, U0_mat = _state_list(fb)
-    Ut_mat = (pfunc(fb, t).data * U0_mat)
-    Ut_list = eachcol(Ut_mat) |> collect
-    ψt_list = Qobj.(Ut_list, dims=ψ0[1].dims)
-    return ψt_list, Ut_mat
 end
 
-
-function state(fb::FloquetBasis, t::TP, ::Val{false}=Val(false)) where {TP<:Real}
-    data
-    ψt_list, _ = _state_list(fb, t, propagator)
-    return ψt_list
+function states(fb::FloquetBasis, t::TP, ::Val{true}) where {TP<:Real}
+    return _states(fb, t, propagator)
 end
 
-function state(fb::FloquetBasis, t::TP, ::Val{true}) where {TP<:Real}
-    data
-    _, Ut_mat = _state_list(fb, t, propagator)
-    return Ut_mat
+function states(fb::FloquetBasis, t::TP, ::Val{false}=Val(false)) where {TP<:Real}
+    return _states(fb, t, propagator) |>
+        M -> _data_to_ketlist(fb.U_T, M)
 end
 
-function state!(fb::FloquetBasis, t::TP, ::Val{false}=Val(false)) where {TP<:Real}
-    data
-    ψt_list, _ = _state_list(fb, t, propagator!)
-    return ψt_list
+function modes(fb::FloquetBasis, t::TP, ::Val{true}) where {TP<:Real}
+    return states(fb, t, Val(true)) |>
+        M -> _state_mtrx_to_mode(fb.equasi, M, t)
 end
 
-function state!(fb::FloquetBasis, t::TP, ::Val{true}) where {TP<:Real}
-    data
-    _, Ut_mat = _state_list(fb, t, propagator!)
-    return Ut_mat
+function modes(fb::FloquetBasis, t::TP, ::Val{false}=Val(false)) where {TP<:Real}
+    return modes(fb, t, Val(true)) |>
+        M -> _data_to_ketlist(fb.U_T, M)
 end
 
-function mode(fb::FloquetBasis, t::TP, ::Val{false}=Val(false)) where {TP<:Real}
-    data
-    ψt_list, _ = _state_list(fb, t, propagator)
-    phases = exp.(1im * t .* fb.equasi)
-    return phases .* ψt_list
+## Side effect: Cache previously uncalculated micromotion operators to FloquetBasis
+
+function states!(fb::FloquetBasis, t::TP, ::Val{true}) where {TP<:Real}
+    return _states(fb, t, propagator!)
 end
 
-function mode(fb::FloquetBasis, t::TP, ::Val{true}) where {TP<:Real}
-    data
-    _, Ut_mat = _state_list(fb, t, propagator)
-    phases_mat = exp.(1im * t .* fb.equasi) |> Diagonal
-    return phases_mat * Ut_mat
+function states!(fb::FloquetBasis, t::TP, ::Val{false}=Val(false)) where {TP<:Real}
+    return _states(fb, t, propagator!) |>
+        M -> _data_to_ketlist(fb.U_T, M)
 end
 
-
-function mode!(fb::FloquetBasis, t::TP, ::Val{false}=Val(false)) where {TP<:Real}
-    data
-    ψt_list, _ = _state_list(fb, t, propagator!)
-    phases = exp.(1im * t .* fb.equasi)
-    return phases .* ψt_list
+function modes!(fb::FloquetBasis, t::TP, ::Val{true}) where {TP<:Real}
+    return states!(fb, t, Val(true)) |>
+        M -> _state_mtrx_to_mode(fb.equasi, M, t)
 end
 
-function mode!(fb::FloquetBasis, t::TP, ::Val{true}) where {TP<:Real}
-    data
-    _, Ut_mat = _state_list(fb, t, propagator!)
-    phases_mat = exp.(1im * t .* fb.equasi) |> Diagonal
-    return phases_mat * Ut_mat
+function modes!(fb::FloquetBasis, t::TP, ::Val{false}=Val(false)) where {TP<:Real}
+    return modes!(fb, t, Val(true)) |>
+        M -> _data_to_ketlist(fb.U_T, M)
 end
 
+############## From and to Floquet Basis funcs
+### For consitency with qutip, define behavior for both Matrix and Qobj data types
 
-
-
-
+# for Qobj
+function to_floquet_basis(
+    fb::FloquetBasis,
+    lab_basis::AbstractQuantumObject,
+    t::TP=0.0,
+    mode_basis::Bool=false
+    ) where {TP<:Real}
+    nothing
+end
 
 """
 TODO: mode, state, from_floquet_basis, to_floquet_basis
