@@ -4,18 +4,18 @@ using LinearAlgebra
 
 ## the functions below work only for vectors not for density matrices
 
-function floquet_mode(fb::FloquetBasis, t::Float64)
+#function floquet_mode(fb::FloquetBasis, t::Float64)
     #t = mod(t, fb.T)
-    eigs = eigenstates(propagator(fb, 0.0, fb.T))
-    evecs_mat = eigs.vectors  
-    phases = Diagonal(exp.(1im * t .* fb.equasi))
-    return propagator(fb, 0.0, t).data * evecs_mat * phases
-end
+#    eigs = eigenstates(propagator(fb, 0.0, fb.T))
+#    evecs_mat = eigs.vectors  
+#    phases = Diagonal(exp.(1im * t .* fb.equasi))
+#    return propagator(fb, 0.0, t).data * evecs_mat * phases
+#end
 
-function floquet_state(fb::FloquetBasis, t::Real; data::Bool=false)
-    mode_mat = floquet_mode(fb, t)
-    return  mode_mat * Diagonal(exp.(-1im * t .* fb.equasi))
-end
+#function floquet_state(fb::FloquetBasis, t::Real; data::Bool=false)
+#    mode_mat = floquet_mode(fb, t)
+#    return  mode_mat * Diagonal(exp.(-1im * t .* fb.equasi))
+#end
 
 #function to_floquet_basis(
 #    fb::FloquetBasis,
@@ -25,13 +25,13 @@ end
 #return (floquet_state(fb, t)' |> Qobj) * ψ
 #end
 
-function from_floquet_basis(
-    fb::FloquetBasis,
-    ψ::QuantumObject{Ket}, # floquet state
-    t::Float64,
-    )
-return (floquet_state(fb, t) |> Qobj) * ψ
-end
+#function from_floquet_basis(
+#    fb::FloquetBasis,
+#    ψ::QuantumObject{Ket}, # floquet state
+#    t::Float64,
+#    )
+#return (floquet_state(fb, t) |> Qobj) * ψ
+#end
 
 
 const σx = sigmax()
@@ -57,7 +57,7 @@ par1 = (
 T = 2π / par1.ω
 fb1 = FloquetBasis(Hevoz(par1),T)
 f_energies = fb1.equasi
-f_modes_1 = floquet_mode(fb1, 0.0)
+f_modes_1 = modes(fb1, 0.0)
 
 
 
