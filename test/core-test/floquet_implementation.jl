@@ -17,13 +17,13 @@ function floquet_state(fb::FloquetBasis, t::Real; data::Bool=false)
     return  mode_mat * Diagonal(exp.(-1im * t .* fb.equasi))
 end
 
-function to_floquet_basis(
-    fb::FloquetBasis,
-    ψ::QuantumObject{Ket},
-    t::Float64,
-    )
-return (floquet_state(fb, t)' |> Qobj) * ψ
-end
+#function to_floquet_basis(
+#    fb::FloquetBasis,
+#    ψ::QuantumObject{Ket},
+#    t::Float64,
+#    )
+#return (floquet_state(fb, t)' |> Qobj) * ψ
+#end
 
 function from_floquet_basis(
     fb::FloquetBasis,
@@ -102,7 +102,7 @@ lines!(ax3, tlist, real.(p_ex_ref3), color=:red, linestyle=:dash, label=L"Lindbl
 lines!(ax3, tlist, 1 .- real.(p_ex_ref3), color=:blue, linestyle=:dash, label=L"Lindblad $P_0$")
 
 axislegend(ax3, position=:rt, outside=true)
-#fig3 |> display
+fig3 |> display
 
 #Fourth box
 par4 = (ϵ0 = par1.ϵ0, δ = 0.0, A = 0.25 * 2 * π, ω = par1.ω)
