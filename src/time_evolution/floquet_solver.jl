@@ -426,7 +426,7 @@ function _states(fb::FloquetBasis, t::TP, pfunc::Function; kwargs...) where {TP<
     # This function is defined to avoid code-repetition when defining mode and
     # state access methods with and without side-effects. The micromotion operator
     # caching is determined through the parameter function pfunc
-    _, _, U0 = modes(fb, Val(true))
+    U0 = modes(fb, Val(true))
     if t == zero(t)
         return U0
     else
