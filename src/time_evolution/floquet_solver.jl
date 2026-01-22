@@ -23,9 +23,6 @@ function qeye_like(A::QuantumObject, ::Val{T}) where {T}
     return qeye_like(A)
 end
 
-function qeye_like(fb::FloquetBasis)
-    return qeye_like(fb.U_T)
-end
 
 struct FloquetEvolutionSol{
     TT1<:AbstractVector{<:Real},
@@ -144,6 +141,12 @@ struct FloquetBasis{
             kwargs,
         )
     end
+end
+
+
+
+function qeye_like(fb::FloquetBasis)
+    return qeye_like(fb.U_T)
 end
 
 
