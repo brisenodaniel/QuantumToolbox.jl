@@ -1,7 +1,6 @@
 export FloquetBasis, FloquetEvolutionSol, propagator, state, fsesolve
 # script helper functions
 function _to_period_interval(tlist::AbstractVector, T::Real)
-using Base: AbstractVecOrTuple
     # function maps all elements ``t`` in `tlist` outside the interval ``[0, T)`` to an equivalent
     # time ``\tau`` such that ``mod(t, T) = \tau``
     if !isempty(tlist)
@@ -98,12 +97,12 @@ struct FloquetBasis{
         """
     function FloquetBasis(
         H::AbstractQuantumObject,
-        T::TP,
+        T::Real,
         precompute::Union{AbstractVector{<:Real}, Nothing}=nothing;
-        params::PP=Nothing,
+        params::PP=nothing,
         alg::AbstractODEAlgorithm = Vern7(lazy = false),
         kwargs::Dict=Dict()
-        ) where {TP<:Real, PP}
+        ) where {PP}
         if T<=0
             throw(
                 ArgumentError("`T` must be a nonzero positive real number")
@@ -225,7 +224,7 @@ function memoize_micromotion!(
     propagator!(fb, tlist; kwargs...)
 end
 
-function memoize_micromotion!(fb::FloquetBasis, t::TP, U::QuantumObject{Operator}) where {TP<:Real}
+function memoize_micromotion!(fb::FloquetBasis, t::Float64, U::QuantumObject{Operator})
     t = _to_period_interval(t, fb.T)
     t_idx = findfirst(x -> x>t, fb.precompute)
     t_idx = isnothing(t_idx) ? length(fb.precompute) + 1 : t_idx
@@ -249,11 +248,10 @@ function propagator(fb::FloquetBasis, t::TP; kwargs...) where {TP<:Real}
     return propagator(fb, 0, t; kwargs...)
 end
 
-#TODO: Change type signatures to allow for different numeric types in t0, tf
-
 function propagator!(fb::FloquetBasis, t::TI; kwargs...) where {TI<:Real}
     return propagator!(fb, 0.0, Float64(t); kwargs...)
 end
+
 
 function propagator(fb::FloquetBasis, t0::TI, tf::TF; kwargs...) where {TI<:Real, TF<:Real}
     t0, tf = Float64[t0, tf] # ensure timepoints are Float64
@@ -514,7 +512,7 @@ function _to_floquet_basis(
     kwargs...
     )
     # this function is defined to avoid code-repetition between functions with and
-    # without micromotion operator caching side-effects. The caching (if present)
+    # without micromotion-operator-caching side-effects. The caching (if present)
     # is done through the function bfunc, which must be one of the state[!] or
     # mode[!] functions.
     U_fb = bfunc(fb, t, Val(true); kwargs...)
