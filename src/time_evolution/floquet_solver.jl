@@ -98,8 +98,10 @@ struct FloquetBasis{
         precompute::Union{AbstractVector{<:Real}, Nothing}=nothing;
         params::PP=nothing,
         alg::AbstractODEAlgorithm = Vern7(lazy = false),
-        kwargs::Dict=Dict()
+        kwargs...
         ) where {PP}
+        # create editable version of kwargs
+        kwargs = Dict{Symbol, Any}(kwargs)
         if T<=0
             throw(
                 ArgumentError("`T` must be a nonzero positive real number")
@@ -153,26 +155,28 @@ end
 function _init_FloquetEvolutionSol(
     fb::FloquetBasis,
     tlist::AbstractVector{<:Real},
-    e_ops::Union{Nothing, AbstractVector, Tuple} = nothing,
+    e_ops::Union{Nothing, AbstractVector, Tuple} = nothing;
     kwargs...
 )
+    # create editable version of kwargs
+    sol_kwargs = Dict{Symbol, Any}(kwargs)
     # determine if expectation values need to be calculated
     has_eops = !(isnothing(e_ops) || isempty(e_ops))
     # determine timesteps at which to store propagated state
     nsteps = length(tlist)
-    if haskey(kwargs, :saveat)
+    if haskey(sol_kwargs, :saveat)
         # entry not checked by multiple dispatch, check if of correct type
-        if !(kwargs[:saveat] isa AbstractVector{<:Real})
+        if !(sol_kwargs[:saveat] isa AbstractVector{<:Real})
             throw(
-                TypeError(:fsesolve, "saveat", AbstractVector{<:Real}, typeof(kwargs[:saveat]))
+                TypeError(:fsesolve, "saveat", AbstractVector{<:Real}, typeof(sol_kwargs[:saveat]))
             )
         end
     elseif !has_eops
-        kwargs[:saveat] = tlist
+        sol_kwargs[:saveat] = tlist
     else
-        kwargs[:saveat] = [tlist[end]]
+        sol_kwargs[:saveat] = [tlist[end]]
     end
-    nstates = length(kwargs[:saveat])
+    nstates = length(sol_kwargs[:saveat])
 
     # determine whether expectation values must be collected
     #  if so, determine size
@@ -180,7 +184,7 @@ function _init_FloquetEvolutionSol(
     # pre-allocate solution memory
     sol = FloquetEvolutionSol(
         tlist,
-        kwargs[:saveat],
+        sol_kwargs[:saveat],
         Vector{QuantumObject{Ket}}(undef, nstates),
         has_eops ? Array{ComplexF64}(undef, nsteps, n_eops) : nothing,
         fb.alg,
@@ -234,8 +238,6 @@ function memoize_micromotion!(fb::FloquetBasis, t::Float64, U::QuantumObject{Ope
     insert!(fb.precompute, t_idx, t)
     insert!(fb.Ulist, t_idx, U)
 end
-
-
 
 function memoize_micromotion!(
     fb::FloquetBasis,
@@ -369,18 +371,15 @@ function _fsesolve(
             U = pfunc(fb, 0, t; kwargs...)
         end
         ψt = U * ψ0
-        if haskey(kwargs, :saveat)
-            state_idx = findfirst(x->x==t, kwargs[:saveat])
-            if !isnothing(state_idx)
-                sol.states[state_idx] = ψt
-            end
+        state_idx = findfirst(x->x==t, sol.times_states)
+        if !isnothing(state_idx)
+            sol.states[state_idx] = ψt
         end
         if !isnothing(sol.expect)
             sol.expect[step,:] = expect.(e_ops, ψt)
         end
         progress_bar ? next!(pbar) : nothing
     end
-    progress_bar ? finish!(pbar) : nothing
     return sol
 end
 
