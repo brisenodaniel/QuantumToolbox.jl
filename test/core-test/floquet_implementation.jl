@@ -2,37 +2,6 @@
 using CairoMakie
 using LinearAlgebra
 
-## the functions below work only for vectors not for density matrices
-
-#function floquet_mode(fb::FloquetBasis, t::Float64)
-    #t = mod(t, fb.T)
-#    eigs = eigenstates(propagator(fb, 0.0, fb.T))
-#    evecs_mat = eigs.vectors  
-#    phases = Diagonal(exp.(1im * t .* fb.equasi))
-#    return propagator(fb, 0.0, t).data * evecs_mat * phases
-#end
-
-#function floquet_state(fb::FloquetBasis, t::Real; data::Bool=false)
-#    mode_mat = floquet_mode(fb, t)
-#    return  mode_mat * Diagonal(exp.(-1im * t .* fb.equasi))
-#end
-
-#function to_floquet_basis(
-#    fb::FloquetBasis,
-#    ψ::QuantumObject{Ket},
-#    t::Float64,
-#    )
-#return (floquet_state(fb, t)' |> Qobj) * ψ
-#end
-
-#function from_floquet_basis(
-#    fb::FloquetBasis,
-#    ψ::QuantumObject{Ket}, # floquet state
-#    t::Float64,
-#    )
-#return (floquet_state(fb, t) |> Qobj) * ψ
-#end
-
 
 const σx = sigmax()
 const σz = sigmaz()
@@ -75,7 +44,7 @@ ax = Axis(fig[1,1], xlabel = L"A/$\omega$", ylabel = L"Quasienergy/$\Delta$", ti
 lines!(ax, A_vec ./ par1.ω, q_energies[:,1] ./ par1.δ, color = :blue)
 lines!(ax, A_vec ./ par1.ω, q_energies[:,2] ./ par1.δ, color = :red)
 
-#fig |> display
+fig |> display
     
 #Third box
 par3 = (ϵ0 = par1.ϵ0, δ = par1.δ, A = 0.5 * 2 * π, ω = par1.ω)
@@ -129,24 +98,8 @@ lines!(ax4, tlist, real.(p_ex_ref4), color=:red, linestyle=:dash, label=L"Lindbl
 lines!(ax4, tlist, 1 .- real.(p_ex_ref4), color=:blue, linestyle=:dash, label=L"Lindblad $P_0$")
 
 axislegend(ax4, position=:rt, outside=true)
-#fig4 |> display
+fig4 |> display
 
-
-### Tests 
-N = 10
-a = destroy(N)
-a_d = a'
-H = num(N) + (a + a_d)
-Ht = QobjEvo(H, (p, t) -> cos(t)) # for test throw
-T = 2π
-psi0 = fock(N, 3)
-t_l = LinRange(0, 200, 1000)
-fb_test1 = FloquetBasis(Ht, T)
-
-
-
-#sol_me = mesolve(H, psi0, t_l, c_ops, e_ops = e_ops, progress_bar = Val(false))
-#rho_me = sol_me.states[end]
 
 
 
