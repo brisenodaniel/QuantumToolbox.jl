@@ -402,7 +402,7 @@ end
 
 function modes(fb::FloquetBasis, ::Val{true}; kwargs...)
     _, _, U0 = eigenstates(fb.U_T)
-    return _state_mtrx_to_mode(fb.equasi, U0.data, fb.T)
+    return _state_mtrx_to_mode(fb.equasi, U0, fb.T)
 end
 
 function modes(fb::FloquetBasis, ::Val{false}=Val(false); kwargs...)
