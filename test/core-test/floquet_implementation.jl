@@ -1,6 +1,15 @@
 # Replicate the plots in Qutip Floquet tutorial
 using CairoMakie
 using LinearAlgebra
+@doc raw"""
+Let us consider a driven two-level system with the Hamiltonian
+```math
+H(t) = -\frac{1}{2}\Delta \sigma_x - \frac{1}{2}\epsilon_0 \sigma_z + \frac{1}{2}A \sin(\omega t) \sigma_z
+```
+where ``A`` is the driving amplitude and ``\omega`` is the driving frequency. In QuantumToolbox, the Hamiltonian 
+above can be used to construct a Floquet basis as follows:
+
+"""
 
 
 const σx = sigmax()
@@ -25,10 +34,21 @@ par1 = (
 )
 T = 2π / par1.ω
 fb1 = FloquetBasis(Hevoz(par1),T)
+
+@doc raw"""
+The floquet quasienergies and the floquet modes at time ``t=0`` can be obtained as follows:
+"""
+
 f_energies = fb1.equasi
-f_modes_1 = modes(fb1, 0.0)
+f_modes_1 = modes(fb1, t = 0.0)
 
 
+@doc raw"""
+Now we are ready to study the floquet quasienergies as a function of the driving amplitude ``A``. Quasienergy levels
+can provide insight into system dynamics. For a driven two-level system, plotting quasienergies against the driving amplitude
+reveals crossings at specific amplitudes. These degeneracies correspond to a suppression of dynamics, 
+a phenomenon known as coherent destruction of tunneling.
+"""
 
 #Second box
 A_vec = range(0.0, 10.0; length=100) .* par1.ω
@@ -45,6 +65,11 @@ lines!(ax, A_vec ./ par1.ω, q_energies[:,1] ./ par1.δ, color = :blue)
 lines!(ax, A_vec ./ par1.ω, q_energies[:,2] ./ par1.δ, color = :red)
 
 fig |> display
+
+@doc raw """
+discuss what to and from floquet basis actually do..... and how you can just use fsesolve
+
+"""
     
 #Third box
 par3 = (ϵ0 = par1.ϵ0, δ = par1.δ, A = 0.5 * 2 * π, ω = par1.ω)

@@ -1,188 +1,74 @@
-using QuantumToolbox
-using Test 
-using Random
-using CarioMakie
+using CairoMakie
+using LinearAlgebra
 
-function _matrix_element(c_op_fmmesolve::AbstractQuantumObject, vp::AbstractVector,ep::AbstractVector)
-    return vp' * c_op_fmmesolve * ep
-end
+N = 90 # Hilbert space dimension
+ω0 = 1 # oscillator frequency as the unit
+g3 = 7.5e-4 #third order nonlinearity
+g4 = 4.027e-6 # fourth order nonlinearity
+ωd = 2.0 # two-photon drive frequency
+T  = 4π / ωd # twice the usual period because of two-photon drive
 
-function _convert_c_ops(c_op_fmmesolve::AbstractQuantumObject, noise_spectrum::Real, vp::AbstractVector, ep::AbstractVector)
-    c_op_mesolve = []
-    N = length(vp)
-    for i in 1:N
-        for j in 1:N
-            if i != j
-                #calculate the rate 
-                gamma = 2 * np.pi * _matrix_element(c_op_fmmesolve, vp[j], vp[i]) * 
-                                _matrix_element(c_op_fmmesolve, vp[i], vp[j]) * 
-                                noise_spectrum(ep[j] - ep[i])
-                
-                # add c_op for mesolve
-                push!(c_op_mesolve, sqrt(gamma) * (vp[i] * vp[j]'))
-                return c_op_mesolve
-            end
-        end
-    end
-end
+M = 0.001
+Ω_d = LinRange(0.0,M,10) # drive amplitude
 
-@testitem "FloquetBasis" begin
-    σz, σx, σy = (sigmaz(), sigmax(), sigmay())
-    H0(;δ, ϵ0, kwargs...) = -(δ/2)*σx - (ϵ0/2)*σz
-    H1(;A, kwargs...) = (A/2) * σz
-    d(p, t) = cos(p.ω * t)
+K  = -3 * g4 / 2 + 10 * g3^2 / (3 * ωd) # effective Kerr nonlinearity
+a = destroy(N)
+a_d = a'
 
-    # box 1
-    b1_p = (ϵ0=2π, δ=0.2*2π, A=2.5*2π, ω=2π)
-    T_b1 = 2π/b1_p[:ω]
-    H_b1 = (H0(;b1_p...), (H1(;b1_p...), d)) |> QobjEvo
-    fb_b1 = FloquetBasis(H_b1, T_b1; params=b1_p)
+q_energies = zeros(Float64, length(Ω_d), N)
 
-    f_energies = fb_b1.equasi
+ad3 = (a + a_d)^3
+ad4 = (a + a_d)^4
 
-end
-
-
-
-@testitem "Floquet Solver" begin
-    N = 10
-    a = destroy(N)
-    a_d = a'
-    coef(p,t) = cos(t)
-    H0 = num(N)
-    H1 = a + a_d
-    H_tuple = (H0,(H1,coef))
-    H_evo = QobjEvo(H_tuple)
-    T = 2 * π
-    tlist = range(0.0, 3T, length=101)
-    floquet_basis = FloquetBasis(H_evo, T, tlist)
-    psi0 = rand_ket(N)
-    floquet_psi0 = to_floquet_basis(floquet_basis, psi0)
-    sol = sesolve(H_tuple, psi0, tlist, e_ops = [], saveat = tlist)
-    states = sol.states
-    fse = floquet_sesolve(floquet_basis, psi0, tlist, T=T)
-    states_fse = fse.states
-    for (t,state) in zip(tlist,states)
-        from_floquet = from_floquet_basis(floquet_basis, floquet_psi0, t)
-        @test overlap(state, from_floquet) ≈ 1.0 atol=8e-5  
-    end
-    for (state_se,state_fse) in zip(states, states_fse)
-        @test overlap(state_se, state_fse) ≈ 1.0 atol=5e-5  
-    end    
-end
-
-@testitem "Floquet Master equation" begin
-    delta = 1.0 * 2π
-    eps0 = 1.0 * 2π
-    A = 0.5 * 2π
-    omega = sqrt(delta^2 + eps0^2)
-    T = 2π / omega
-    tlist = range(0.0, 2 * T, 101)
-    psi0 = rand_ket(2)
-    H0 = - eps0 / 2 * sigmaz() - delta / 2 * sigmax()
-    H1 = A/2.0 * sigmax()
-    H = (H0, (H1, t -> sin(omega * t)))
-    e_ops = [num(2)]
-    gamma1 = 0
-
-    #collapse operator for Floquet-Markov master equation
-    c_op_fmmesolve = sigmax()
-
-    #collapse operator for Lindblad master equation
-    @inline spectrum(ω::Real) = ifelse(ω>0, ω * 0.5 * gamma1 / (2π), zero(ω))
-
-    (ep, vp) = eigenstates(H0)
-    op0 = vp[1] * vp[1]'
-    op1 = vp[2] * vp[2]'
-
-    c_op_mesolve = _convert_c_ops(c_op_fmmesolve, spectrum, vp, ep)
-
-    #Solve the floquet markov master equation
-    p_ex = fmmesolve(H, psi0, tlist, c_op_fmmesolve, spectrum, T; e_ops = [num(2)], saveat = tlist).expect
-    
-    #compare with mesolve
-    p_ex_ref = mesolve(H, psi0, tlist, c_op_mesolve; e_ops = [num(2)]).expect
-
-    @test real.p_ex ≈ real.p_ex_ref atol=1e-4
-
-end
-
-# Test Floquet master equation with dissipation for two-level system
-
-@testitem "FME 2level dissipation" begin
-    delta = 1.0 * 2π
-    eps0 = 1.0 * 2π
-    A = 0.0 * 2π
-    omega = sqrt(delta^2 + eps0^2)
-    T = 2π / omega
-    tlist = range(0.0, 2 * T, 101)
-    psi0 = rand_ket(2)
-    H0 = - eps0 / 2 * sigmaz() - delta / 2 * sigmax()
-    H1 = A/2.0 * sigmax()
-    H = (H0, (H1, t -> sin(omega * t)))
-    e_ops = [num(2)]
-    gamma1 = 1.0
-
-    # Collapse operator for Floquet-Markov Master Equation
-    c_op_fmmesolve = sigmax()
-
-    # Collapse operator for Lindblad Master Equation
-    @inline spectrum(ω::Real) = ifelse(ω>0, ω * 0.5 * gamma1 / (2π), zero(ω))
-
-    (ep, vp) = eigenstates(H0)
-    op0 = vp[1] * vp[1]'
-    op1 = vp[2] * vp[2]'
-
-    c_op_mesolve = _convert_c_ops(c_op_fmmesolve, spectrum, vp, ep)
-
-    #Solve the floquet markov master equation
-    p_ex = fmmesolve(H, psi0, tlist, c_op_fmmesolve, spectrum, T; e_ops = [num(2)], saveat = tlist).expect
-    
-    #compare with mesolve
-    p_ex_ref = mesolve(H, psi0, tlist, c_op_mesolve; e_ops = [num(2)]).expect
-
-    @test real.p_ex ≈ real.p_ex_ref atol=1e-4
-
-end
-
-
-@testset "Floquet Master Equation" begin
-    for kmax in (5, 25, 100)
-        delta = 1.0 * 2π
-        eps0 = 1.0 * 2π
-        A = 0.0 * 2π
-        omega = sqrt(delta^2 + eps0^2)
-        T = 2π / omega
-        tlist = range(0.0, 2 * T, 101)
-        psi0 = rand_ket(2)
-        H0 = - eps0 / 2 * sigmaz() - delta / 2 * sigmax()
-        H1 = A/2.0 * sigmax()
-        H = (H0, (H1, t -> sin(omega * t)))
-        e_ops = [num(2)]
-        gamma1 = 1.0
-
-        # Collapse operator for Floquet-Markov Master Equation
-        c_op_fmmesolve = sigmax()
-
-        # Collapse operator for Lindblad Master Equation
-        @inline spectrum(ω::Real) = ifelse(ω>0, ω * 0.5 * gamma1 / (2π), zero(ω))
-
-        (ep, vp) = eigenstates(H0)
-        op0 = vp[1] * vp[1]'
-        op1 = vp[2] * vp[2]'
-
-        c_op_mesolve = _convert_c_ops(c_op_fmmesolve, spectrum, vp, ep)
-
-        #Solve the floquet master equation
-        floquet_basis = FloquetBasis(H, T, tlist)
-        solver = FMESolver(floquet_basis, c_op_fmmesolve, spectrum, kmax=kmax)  
-
-        #Not sure how the FMESolver will work in our case 1) Look into qutip on what is going on and 2) Implement the test properly here
-
-    end
+for (idx, Omd) in enumerate(Ω_d)
+    H0 = ω0 * a_d * a +(g3 / 3) * ad3 + (g4 / 4) * ad4 
+    H1 = -im * Omd * (a - a_d)
+    f(p, t) = cos(ωd * t)
+    Hevo = (H0, (H1, f)) |> QobjEvo
+    fbasis = FloquetBasis(Hevo, T)
+    q_energies[idx, :] .= sort(fbasis.equasi; rev = true)
 end
 
 
 
 
+fig1 = Figure()
+ax1 = Axis(fig1[1, 1],
+    xlabel = L"\Omega_d",
+    ylabel = L"(\epsilon_n - \epsilon_0)/K"
+)
 
+lines!(ax1, Ω_d, (q_energies[:, 2] .- q_energies[:, 1]) ./ K)
+lines!(ax1, Ω_d, (q_energies[:, 3] .- q_energies[:, 1]) ./ K)
+lines!(ax1, Ω_d, (q_energies[:, 4] .- q_energies[:, 1]) ./ K)
+lines!(ax1, Ω_d, (q_energies[:, 5] .- q_energies[:, 1]) ./ K)
+lines!(ax1, Ω_d, (q_energies[:, 6] .- q_energies[:, 1]) ./ K)
+lines!(ax1, Ω_d, (q_energies[:, 7] .- q_energies[:, 1]) ./ K)
+lines!(ax1, Ω_d, (q_energies[:, 8] .- q_energies[:, 1]) ./ K)
+
+fig1 |> display
+
+eigs = zeros(Float64, length(Ω_d), N)
+for (idx,Omd) in enumerate(Ω_d)
+    Π = 4 * Omd / (3 * ωd)
+    Δ = ω0 - ωd/2 + 6 * g4 * Π^2 - 18 * g3^2 * Π^2 / ωd + 2 * K
+    ϵ2 = g3 * Π
+    Ham_K = Δ * a_d * a - (K / 2) * a_d * a_d * a * a + ϵ2 * (a_d * a_d + a * a)
+    eigs[idx, :] .= real.(eigenenergies(Ham_K))
+end
+
+fig = Figure()
+ax = Axis(fig[1, 1],
+    xlabel = L"\Omega_d",
+    ylabel = L"(\epsilon_n - \epsilon_0)/K"
+)
+
+lines!(ax, Ω_d, -(eigs[:, 2] .- eigs[:, 1]) ./ K)
+lines!(ax, Ω_d, -(eigs[:, 3] .- eigs[:, 1]) ./ K)
+lines!(ax, Ω_d, -(eigs[:, 4] .- eigs[:, 1]) ./ K)
+lines!(ax, Ω_d, -(eigs[:, 5] .- eigs[:, 1]) ./ K)
+lines!(ax, Ω_d, -(eigs[:, 6] .- eigs[:, 1]) ./ K)
+lines!(ax, Ω_d, -(eigs[:, 7] .- eigs[:, 1]) ./ K)
+lines!(ax, Ω_d, -(eigs[:, 8] .- eigs[:, 1]) ./ K)
+
+fig |> display

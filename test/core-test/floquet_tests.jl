@@ -97,8 +97,44 @@ end
 
 
 
-#test Kerr-cat (working on the final version)
+#test Kerr-cat (working in progress)
+@testitem "Test Floquet Kerr cat" begin
+    N = 90 # Hilbert space dimension
+    ω0 = 1 # oscillator frequency as the unit
+    g3 = 7.5e-4 #third order nonlinearity
+    g4 = 4.027e-6 # fourth order nonlinearity
+    ωd = 2.0 # two-photon drive frequency
+    T  = 4π / ωd # twice the usual period because of two-photon drive
 
+    M = 0.001
+    Ω_d = LinRange(0.0,M,10) # drive amplitude
 
+    K  = -3 * g4 / 2 + 10 * g3^2 / (3 * ωd) # effective Kerr nonlinearity
+    a = destroy(N)
+    a_d = a'
+
+    q_energies = zeros(Float64, length(Ω_d), N)
+
+    ad3 = (a + a_d)^3
+    ad4 = (a + a_d)^4
+
+    for (idx, Omd) in enumerate(Ω_d)
+        H0 = ω0 * a_d * a +(g3 / 3) * ad3 + (g4 / 4) * ad4 
+        H1 = -im * Omd * (a - a_d)
+        f(p, t) = cos(ωd * t)
+        Hevo = (H0, (H1, f)) |> QobjEvo
+        fbasis = FloquetBasis(Hevo, T)
+        q_energies[idx, :] .= sort(fbasis.equasi; rev = true)
+    end
+
+    eigs = zeros(Float64, length(Ω_d), N)
+    for (idx,Omd) in enumerate(Ω_d)
+        Π = 4 * Omd / (3 * ωd)
+        Δ = ω0 - ωd/2 + 6 * g4 * Π^2 - 18 * g3^2 * Π^2 / ωd + 2 * K
+        ϵ2 = g3 * Π
+        Ham_K = Δ * a_d * a - (K / 2) * a_d * a_d * a * a + ϵ2 * (a_d * a_d + a * a)
+        eigs[idx, :] .= real.(eigenenergies(Ham_K))
+    end
+end
 
 
