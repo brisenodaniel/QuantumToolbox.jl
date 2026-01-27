@@ -28,15 +28,16 @@ struct FloquetEvolutionSol{
     TT1<:AbstractVector{<:Real},
     TT2<:AbstractVector{<:Real},
     TS<:AbstractVector{<:AbstractQuantumObject},
-    TE<:Union{AbstractMatrix{<:Real}, Nothing},
     AlgT<:AbstractODEAlgorithm,
     TolT<:Real
 }
     times::TT1
     times_states::TT2
     states::TS
-    expect::TE
+    expect::AbstractVector{ComplexF64}
     alg::AlgT
+    abstol_UT::TolT
+    reltol_UT::TolT
     abstol::TolT
     reltol::TolT
 end
@@ -60,8 +61,7 @@ Julia struct containing propagators, quasienergies, and Floquet states for a sys
 """
 struct FloquetBasis{
     TQ<:AbstractVector{<:AbstractQuantumObject},
-    TolT<:Real,
-    PP
+    PP,
 }
     H::AbstractQuantumObject
     T::Float64
@@ -70,10 +70,10 @@ struct FloquetBasis{
     Ulist::TQ
     equasi::AbstractVector{Float64}
     alg::AbstractODEAlgorithm
-    abstol::TolT
-    reltol::TolT
+    abstol_UT::Float64
+    reltol_UT::Float64
     params::PP
-    kwargs::Dict
+    kwargs::Union{Dict, NamedTuple}
 
     @doc raw"""
         FloquetBasis(H::AbstractQuantumObject, T::Real, tlist::AbstractVector{Real}, precompute::Bool = true; kwargs::Dict = Dict())
@@ -98,6 +98,10 @@ struct FloquetBasis{
         precompute::Union{AbstractVector{<:Real}, Nothing}=nothing;
         params::PP=nothing,
         alg::AbstractODEAlgorithm = Vern7(lazy = false),
+        reltol_UT::Real=1e-12, # smaller tolerance for error when computing period-prop
+        abstol_UT::Union{Real, Nothing}=nothing, # keep error floor at default unless user specifies otherwise
+        tidyup_UT::Bool=true, # set noise floor of period-propagator at abstol of solver
+        tidyup_micromotion::Bool=false, # set noise floor of micromotion operators at abstol of solver
         kwargs...
         ) where {PP}
         # create editable version of kwargs
@@ -112,24 +116,34 @@ struct FloquetBasis{
         precompute = _to_period_interval(precompute, T)
         tlist = Float64[0, precompute..., T] |> unique
         tlist = union(tlist, precompute) # ensure all times in precompute are in tlist
-        # solve for propagators
-        kwargs[:saveat] = precompute
-
+        # assemble integrator kwargs used for propagator
+        kwargs_UT = (kwargs..., saveat=precompute, reltol=reltol_UT)
+        if !isnothing(abstol_UT)
+            kwargs_UT = (kwargs_UT..., abstol=abstol_UT)
+        end
+        # compute propagators
         sol = sesolve(
             H,
             qeye_like(H, Val(true)),
             tlist;
             params=params,
             alg=alg,
-            kwargs...
+            kwargs_UT...
                 )
         Ulist = sol.states
         U_T = pop!(Ulist)
+        # tidyup period-propagator and micromotion propagators according to boolean flags
+        if tidyup_UT
+            tidyup!(U_T, sol.abstol)
+        end
+        if tidyup_micromotion
+            tidyup!.(Ulist, sol.abstol)
+        end
         # solve for quasienergies
         period_phases = eigenenergies(U_T)
         equasi = angle.(period_phases) ./ T |> sort
 
-        new{ typeof(Ulist), typeof(sol.abstol), PP}(
+        new{typeof(Ulist), PP}(
             H,
             Float64(T),
             precompute,
@@ -145,7 +159,13 @@ struct FloquetBasis{
     end
 end
 
-
+function Base.getproperty(fb::FloquetBasis, key::Symbol)
+    if key==:dims
+        return fb.H.dims
+    else
+        return Core.getfield(fb, key)
+    end
+end
 
 function qeye_like(fb::FloquetBasis)
     return qeye_like(fb.U_T)
@@ -182,14 +202,17 @@ function _init_FloquetEvolutionSol(
     #  if so, determine size
     n_eops = has_eops ? length(e_ops) : 0
     # pre-allocate solution memory
+
     sol = FloquetEvolutionSol(
         tlist,
         sol_kwargs[:saveat],
         Vector{QuantumObject{Ket}}(undef, nstates),
-        has_eops ? Array{ComplexF64}(undef, nsteps, n_eops) : nothing,
+        has_eops ? Array{ComplexF64}(undef, nsteps, n_eops) : ComplexF64[],
         fb.alg,
-        fb.abstol,
-        fb.reltol
+        fb.abstol_UT,
+        fb.reltol_UT,
+        haskey(sol_kwargs, :abstol) ? sol_kwargs[:abstol] : 0.0,
+        haskey(sol_kwargs, :reltol) ? sol_kwargs[:reltol] : 0.0,
     )
     return sol
 end
@@ -249,11 +272,11 @@ function memoize_micromotion!(
     end
 end
 
-function propagator(fb::FloquetBasis, t::TP; kwargs...) where {TP<:Real}
+function propagator(fb::FloquetBasis, t::Real; kwargs...)
     return propagator(fb, 0, t; kwargs...)
 end
 
-function propagator!(fb::FloquetBasis, t::TI; kwargs...) where {TI<:Real}
+function propagator!(fb::FloquetBasis, t::Real; kwargs...)
     return propagator!(fb, 0.0, Float64(t); kwargs...)
 end
 
@@ -263,6 +286,10 @@ function propagator(fb::FloquetBasis, t0::TI, tf::TF; kwargs...) where {TI<:Real
     U0, U_nT, U_intra = _prop_list(fb, t0, tf; kwargs...)
     return U_intra * U_nT * U0'
 end
+
+# TODO: Current implementation of Propagator makes fsesolve slower than sesolve.
+# This can be fixed by forcing fesolve to make only one call to sesolve, in which
+# all required uncached micromotion operators are calculated in that single call.
 
 function propagator!(fb::FloquetBasis, t0::TI, tf::TF; kwargs) where{TI<:Real, TF<:Real}
     t0, tf = Float64[t0, tf] # ensure timepoints are Float64
@@ -290,14 +317,21 @@ function _prop_list(fb::FloquetBasis, t0::Float64, tf::Float64; kwargs...)
             throw(
                 ErrorException(
                     "`memoized_only` keyword argument set to `true`, but "*
-                        "the micromotion propagator corresponding to `tf=$tf` "*
+                        "the micromotion propagatoo `tf=$tf` "*
                         "is not memoized in fb."
                 )
             )
         end
         tlist = Float64[0.0, t_rem]
         kwargs = Dict(fb.kwargs..., kwargs...)
-        U_intra = sesolve(fb.H, qeye_like(fb.H, Val(true)), tlist; alg=fb.alg, kwargs...).states[end]
+        U_intra = sesolve(
+            fb.H,
+            qeye_like(fb.H, Val(true)),
+            tlist;
+            alg=fb.alg,
+            progress_bar=Val(false),
+            kwargs...
+                ).states[end]
     end
     return U0, U_nT, U_intra
 end
@@ -375,7 +409,7 @@ function _fsesolve(
         if !isnothing(state_idx)
             sol.states[state_idx] = ψt
         end
-        if !isnothing(sol.expect)
+        if !isempty(sol.expect)
             sol.expect[step,:] = expect.(e_ops, ψt)
         end
         progress_bar ? next!(pbar) : nothing
@@ -386,13 +420,16 @@ end
 
 ###### State and Mode helper functions
 
-function _data_to_ketlist(Op::AbstractQuantumObject, M::AbstractMatrix)
+function _data_to_ketlist(M::AbstractMatrix, dims::DT) where {DT<:AbstractVector{Int}}
     M_list = eachcol(M) |> collect
-    ψ_list = Qobj.(M_list, dims=Op.dims)
+    ψ_list = Qobj.(M_list, dims=dims)
     return ψ_list
 end
 
-function _state_mtrx_to_mode(equasi::AbstractVector{Float64}, M::AbstractMatrix, t::Float64)
+function _state_mtrx_to_mode(
+    M::AbstractMatrix,
+    equasi::AbstractVector{Float64},
+    t::Float64)
     ϕ_mat = exp.(1im * t .* equasi) |> Diagonal
     return ϕ_mat * M
 end
@@ -401,11 +438,11 @@ end
 
 function modes(fb::FloquetBasis, ::Val{true}; kwargs...)
     _, _, U0 = eigenstates(fb.U_T)
-    return _state_mtrx_to_mode(fb.equasi, U0, fb.T)
+    return _state_mtrx_to_mode(U0, fb.equasi, fb.T)
 end
 
 function modes(fb::FloquetBasis, ::Val{false}=Val(false); kwargs...)
-    return modes(fb, Val(true)) |> x -> _data_to_ketlist(fb.U_T, x)
+    return modes(fb, Val(true)) |> x -> _data_to_ketlist(x, fb.dims)
 end
 
 # at t=0, state function is alias for modes function, since the Floquet
@@ -418,10 +455,8 @@ function states(fb::FloquetBasis, ::Val{false}=Val(false); kwargs...)
     return modes(fb, Val(false))
 end
 
-######## Get States and Modes at t>0
-## No side-effects
 
-function _states(fb::FloquetBasis, t::TP, pfunc::Function; kwargs...) where {TP<:Real}
+function _states(fb::FloquetBasis, t::Real, pfunc::Function; kwargs...)
     # This function is defined to avoid code-repetition when defining mode and
     # state access methods with and without side-effects. The micromotion operator
     # caching is determined through the parameter function pfunc
@@ -434,146 +469,369 @@ function _states(fb::FloquetBasis, t::TP, pfunc::Function; kwargs...) where {TP<
     end
 end
 
-function states(fb::FloquetBasis, t::TP, ::Val{true}; kwargs...) where {TP<:Real}
+######## Get States and Modes at t>0
+## No side-effects
+function states(fb::FloquetBasis, t::Real, ::Val{true}; kwargs...)
     return _states(fb, t, propagator; kwargs...)
 end
 
-function states(fb::FloquetBasis, t::TP, ::Val{false}=Val(false); kwargs...) where {TP<:Real}
+function states(fb::FloquetBasis, t::Real, ::Val{false}=Val(false); kwargs...)
     return _states(fb, t, propagator; kwargs...) |>
-        M -> _data_to_ketlist(fb.U_T, M)
+        M -> _data_to_ketlist(M, fb.dims)
 end
 
-function modes(fb::FloquetBasis, t::TP, ::Val{true}; kwargs...) where {TP<:Real}
+function modes(fb::FloquetBasis, t::Real, ::Val{true}; kwargs...)
     return states(fb, t, Val(true); kwargs...) |>
-        M -> _state_mtrx_to_mode(fb.equasi, M, t)
+        M -> _state_mtrx_to_mode(M, fb.equasi, t)
 end
 
-function modes(fb::FloquetBasis, t::TP, ::Val{false}=Val(false); kwargs...) where {TP<:Real}
+function modes(fb::FloquetBasis, t::Real, ::Val{false}=Val(false); kwargs...)
     return modes(fb, t, Val(true); kwargs...) |>
-        M -> _data_to_ketlist(fb.U_T, M)
+        M -> _data_to_ketlist(M, fb.dims)
 end
 
 ## Side effect: Cache previously uncalculated micromotion operators to FloquetBasis
 
-function states!(fb::FloquetBasis, t::TP, ::Val{true}; kwargs...) where {TP<:Real}
+function states!(fb::FloquetBasis, t::Real, ::Val{true}; kwargs...)
     return _states(fb, t, propagator!; kwargs...)
 end
 
-function states!(fb::FloquetBasis, t::TP, ::Val{false}=Val(false); kwargs...) where {TP<:Real}
+function states!(fb::FloquetBasis, t::Real, ::Val{false}=Val(false); kwargs...)
     return _states(fb, t, propagator!; kwargs...) |>
-        M -> _data_to_ketlist(fb.U_T, M)
+        M -> _data_to_ketlist(M, fb.dims)
 end
 
-function modes!(fb::FloquetBasis, t::TP, ::Val{true}; kwargs...) where {TP<:Real}
+function modes!(fb::FloquetBasis, t::Real, ::Val{true}; kwargs...)
     return states!(fb, t, Val(true); kwargs...) |>
-        M -> _state_mtrx_to_mode(fb.equasi, M, t)
+        M -> _state_mtrx_to_mode(M, fb.equasi, t)
 end
 
-function modes!(fb::FloquetBasis, t::TP, ::Val{false}=Val(false); kwargs...) where {TP<:Real}
+function modes!(fb::FloquetBasis, t::Real, ::Val{false}=Val(false); kwargs...)
     return modes!(fb, t, Val(true); kwargs...) |>
-        M -> _data_to_ketlist(fb.U_T, M)
+        M -> _data_to_ketlist(M, fb.dims)
 end
 
 ############## From and to Floquet Basis funcs
 ### For consitency with qutip, define behavior for both Matrix and Qobj data types,
 
+# First, define functions to return transformation matrices to and from the Floquet
+# basis. These will just be wrappers around mode and state, since calling
+# these functions with the ::Val{true} set will return the transformation matrix
+# in .data format
 
-function _to_floquet_basis(
+# no caching new micromotion operators
+function from_floquet_basis(
     fb::FloquetBasis,
-    lab_basis::AbstractQuantumObject,
-    bfunc::Function,
-    t::Real=0.0;
+    t::Real=0.0,
+    ::Val{false}=Val(false);
+    mode_basis::Bool=false,
     kwargs...
     )
-    # this function is defined to avoid code-repetition between functions with and
-    # without micromotion operator caching side-effects. The caching (if present)
-    # is done through the function bfunc, which must be one of the state[!] or
-    # mode[!] functions.
-    U_fb = bfunc(fb, t, Val(true); kwargs...) |>
-        U -> Qobj(U, dims=fb.H.dims)
-    if isket(lab_basis)
-        fl_basis = U_fb' * lab_basis
-    elseif isbra(lab_basis)
-        fl_basis = lab_basis * U_fb
-    elseif lab_basis.type == Operator() # isoper returns false for QobjEvo ops
-        fl_basis =  U_fb' * lab_basis * U_fb
-    else
-        throw(
-            ErrorException("FloquetBasis operations with Qobj type "*
-                "$lab_basis.type are not yet supported.")
-        )
-    end
-    return fl_basis
+    bfunc = mode_basis ? modes : states
+    return bfunc(fb, t, Val(true); kwargs...) |>
+        U -> Qobj(U, dims=fb.dims)
 end
 
-function _to_floquet_basis(
+function from_floquet_basis(
     fb::FloquetBasis,
-    lab_basis::Union{AbstractVector, AbstractMatrix},
-    bfunc::Function,
-    t::Real=0.0;
-    kwargs...
-    )
-    # this function is defined to avoid code-repetition between functions with and
-    # without micromotion-operator-caching side-effects. The caching (if present)
-    # is done through the function bfunc, which must be one of the state[!] or
-    # mode[!] functions.
-    U_fb = bfunc(fb, t, Val(true); kwargs...)
-    # determine if lab_basis is operator or vector
-    if lab_basis isa AbstractVector
-        fl_basis = U_fb' * lab_basis
-    else
-        fl_basis = U_fb' * lab_basis * U_fb
-    end
-    return fl_basis
+    t::Real,
+    ::Val{true};
+    mode_basis::Bool=false,
+    kwargs...)
+    bfunc= mode_basis ? modes : states
+    return bfunc(fb, t, Val(true); kwargs...)
 end
 
 
 function to_floquet_basis(
     fb::FloquetBasis,
-    lab_basis::Union{AbstractQuantumObject, AbstractVector, AbstractMatrix},
     t::Real=0.0,
-    mode_basis::Bool=false;
+    ::Val{false}=Val(false);
+    mode_basis::Bool=false,
     kwargs...
     )
-    bfunc = mode_basis ? modes : states
-    return _to_floquet_basis(fb, lab_basis, bfunc, t; kwargs...)
+    # to is just adjoint of from
+    return from_floquet_basis(fb,
+                              t,
+                              Val(false);
+                              mode_basis=mode_basis,
+                              kwargs...)'
+end
+
+function to_floquet_basis(
+    fb::FloquetBasis,
+    t::Real,
+    ::Val{true};
+    mode_basis::Bool=false,
+    kwargs...)
+    # to is just adjoint of from
+    return from_floquet_basis(fb,
+                              t,
+                              Val(true);
+                              mode_basis=mode_basis,
+                              kwargs...)'
+end
+
+# with micromotion operator caching
+
+function from_floquet_basis!(
+    fb::FloquetBasis,
+    t::Real=0.0,
+    ::Val{false}=Val(false);
+    mode_basis::Bool=false,
+    kwargs...
+    )
+    bfunc = mode_basis ? modes! : states!
+    return bfunc(fb, t, Val(true); kwargs...) |>
+        U -> Qobj(U, dims=fb.dims)
+end
+
+function from_floquet_basis!(
+    fb::FloquetBasis,
+    t::Real,
+    ::Val{true};
+    mode_basis::Bool=false,
+    kwargs...)
+    bfunc= mode_basis ? modes! : states!
+    return bfunc(fb, t, Val(true); kwargs...)
+end
+
+
+function to_floquet_basis!(
+    fb::FloquetBasis,
+    t::Real=0.0,
+    ::Val{false}=Val(false);
+    mode_basis::Bool=false,
+    kwargs...
+    )
+    # to is just adjoint of from
+    return from_floquet_basis!(fb,
+                              t,
+                              Val(false);
+                              mode_basis=mode_basis,
+                              kwargs...)'
 end
 
 function to_floquet_basis!(
     fb::FloquetBasis,
-    lab_basis::Union{AbstractQuantumObject, AbstractVector, AbstractMatrix},
-    t::Real=0.0,
-    mode_basis::Bool=false;
-    kwargs...
-    )
-    bfunc = mode_basis ? modes! : states!
-    return _to_floquet_basis(fb, lab_basis, bfunc, t; kwargs...)
+    t::Real,
+    ::Val{true};
+    mode_basis::Bool=false,
+    kwargs...)
+    # to is just adjoint of from
+    return from_floquet_basis!(fb,
+                              t,
+                              Val(true);
+                              mode_basis=mode_basis,
+                              kwargs...)'
 end
 
+
+# now define functions that apply the transformation to a given
+# operator or vector
+
+##### for Qobj return type
+## no micromotion caching
 function from_floquet_basis(
     fb::FloquetBasis,
-    floquet_basis::Union{AbstractQuantumObject, AbstractVector, AbstractMatrix},
-    t::Real=0.0,
-    mode_basis::Bool=false;
+    floquet_qobj::AbstractQuantumObject,
+    t::Real=0.0;
+    mode_basis::Bool=false,
     kwargs...
     )
-    # math is the same as to_floquet_basis, but basis transforms are inverted,
-    # ...so just recycle that
-    bfunc = mode_basis ? modes : states # basis function
-    return _to_floquet_basis(fb, floquet_basis, adjoint ∘ bfunc, t; kwargs...)
+    U_trans = from_floquet_basis(fb,
+                                 t,
+                                 Val(false);
+                                 mode_basis=mode_basis,
+                                 kwargs...)
+    if isket(floquet_qobj)
+        lab_qobj = U_trans * floquet_qobj
+    elseif isbra(floquet_qobj)
+        lab_qobj = floquet_qobj * U_trans'
+    elseif floquet_qobj.type==Operator() # isop returns false for QobjEvo
+        lab_qobj = U_trans * floquet_qobj * U_trans'
+    else
+        throw(
+            ErrorException(
+                "FloquetBasis transformations not supported for operators of type $floquet_qobj.type"
+            )
+        )
+    end
+    return lab_qobj
 end
 
+
+function to_floquet_basis(
+    fb::FloquetBasis,
+    lab_qobj::AbstractQuantumObject,
+    t::Real=0.0;
+    mode_basis::Bool=false,
+    kwargs...
+    )
+    U_trans = to_floquet_basis(fb,
+                               t,
+                               Val(false);
+                               mode_basis=mode_basis,
+                               kwargs...)
+    if isket(lab_qobj)
+        floquet_qobj = U_trans * lab_qobj
+    elseif isbra(lab_qobj)
+        floquet_qobj = lab_qobj * U_trans'
+    elseif lab_qobj.type==Operator() # isop returns false for QobjEvo
+        floquet_qobj = U_trans * lab_qobj * U_trans'
+    else
+        throw(
+            ErrorException(
+                "FloquetBasis transformations not supported for operators of type $lab_qobj.type"
+            )
+        )
+    end
+    return floquet_qobj
+end
+
+### with micromotion caching
 
 function from_floquet_basis!(
     fb::FloquetBasis,
-    floquet_basis::Union{AbstractQuantumObject, AbstractVector, AbstractMatrix},
-    t::Real=0.0,
-    mode_basis::Bool=false;
+    floquet_qobj::AbstractQuantumObject,
+    t::Real=0.0;
+    mode_basis::Bool=false,
     kwargs...
     )
-    # math is the same as to_floquet_basis, but basis transforms are inverted,
-    # ...so just recycle that
-    bfunc = mode_basis ? modes! : states! # basis function
-    return _to_floquet_basis(fb, floquet_basis, adjoint ∘ bfunc, t; kwargs...)
+    U_trans = from_floquet_basis!(fb,
+                                 t,
+                                 Val(false);
+                                 mode_basis=mode_basis,
+                                 kwargs...)
+    if isket(floquet_qobj)
+        lab_qobj = U_trans * floquet_qobj
+    elseif isbra(floquet_qobj)
+        lab_qobj = floquet_qobj * U_trans'
+    elseif floquet_qobj.type==Operator() # isop returns false for QobjEvo
+        lab_qobj = U_trans * floquet_qobj * U_trans'
+    else
+        throw(
+            ErrorException(
+                "FloquetBasis transformations not supported for operators of type $floquet_qobj.type"
+            )
+        )
+    end
+    return lab_qobj
 end
 
+
+function to_floquet_basis!(
+    fb::FloquetBasis,
+    lab_qobj::AbstractQuantumObject,
+    t::Real=0.0;
+    mode_basis::Bool=false,
+    kwargs...
+    )
+    U_trans = to_floquet_basis!(fb,
+                               t,
+                               Val(false);
+                               mode_basis=mode_basis,
+                               kwargs...)
+    if isket(lab_qobj)
+        floquet_qobj = U_trans * lab_qobj
+    elseif isbra(lab_qobj)
+        floquet_qobj = lab_qobj * U_trans'
+    elseif lab_qobj.type==Operator() # isop returns false for QobjEvo
+        floquet_qobj = U_trans * lab_qobj * U_trans'
+    else
+        throw(
+            ErrorException(
+                "FloquetBasis transformations not supported for operators of type $lab_qobj.type"
+            )
+        )
+    end
+    return floquet_qobj
+end
+
+
+################# for .data return type
+### without micromotion caching
+
+function from_floquet_basis(
+    fb::FloquetBasis,
+    floquet_array::Union{AbstractMatrix, AbstractVector},
+    t::Real=0.0;
+    mode_basis::Bool=false,
+    kwargs...
+    )
+    U_trans = from_floquet_basis(fb,
+                                 t,
+                                 Val(true);
+                                 mode_basis=mode_basis,
+                                 kwargs...)
+    if floquet_array isa AbstractVector
+        lab_array = U_trans * floquet_array
+    else
+        lab_array = U_trans * floquet_array * U_trans'
+    end
+    return lab_array
+end
+
+
+function to_floquet_basis(
+    fb::FloquetBasis,
+    lab_array::Union{AbstractMatrix, AbstractVector},
+    t::Real=0.0;
+    mode_basis::Bool=false,
+    kwargs...
+    )
+    U_trans = to_floquet_basis(fb,
+                                 t,
+                                 Val(true);
+                                 mode_basis=mode_basis,
+                                 kwargs...)
+    if lab_array isa AbstractVector
+        floquet_array = U_trans * lab_array
+    else
+        floquet_array = U_trans * lab_array * U_trans'
+    end
+    return floquet_array
+end
+
+# with micromotion caching
+
+function from_floquet_basis!(
+    fb::FloquetBasis,
+    floquet_array::Union{AbstractMatrix, AbstractVector},
+    t::Real=0.0;
+    mode_basis::Bool=false,
+    kwargs...
+    )
+    U_trans = from_floquet_basis!(fb,
+                                 t,
+                                 Val(true);
+                                 mode_basis=mode_basis,
+                                 kwargs...)
+    if floquet_array isa AbstractVector
+        lab_array = U_trans * floquet_array
+    else
+        lab_array = U_trans * floquet_array * U_trans'
+    end
+    return lab_array
+end
+
+
+function to_floquet_basis!(
+    fb::FloquetBasis,
+    lab_array::Union{AbstractMatrix, AbstractVector},
+    t::Real=0.0;
+    mode_basis::Bool=false,
+    kwargs...
+    )
+    U_trans = to_floquet_basis!(fb,
+                                 t,
+                                 Val(true);
+                                 mode_basis=mode_basis,
+                                 kwargs...)
+    if lab_array isa AbstractVector
+        floquet_array = U_trans * lab_array
+    else
+        floquet_array = U_trans * lab_array * U_trans'
+    end
+    return floquet_array
+end
