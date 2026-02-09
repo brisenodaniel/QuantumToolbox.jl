@@ -1,4 +1,4 @@
-export FloquetBasis, FloquetEvolutionSol, propagator, fsesolve, to_floquet_basis, from_floquet_basis, modes, states
+export FloquetBasis, FloquetEvolutionSol, propagator, propagator!, fsesolve, fsesolve!, to_floquet_basis, to_floquet_basis!, from_floquet_basis, from_floquet_basis!, modes, modes!, states, states!
 # script helper functions
 function _to_period_interval(tlist::AbstractVector, T::Real)
     # function maps all elements ``t`` in `tlist` outside the interval ``[0, T)`` to an equivalent
@@ -112,12 +112,16 @@ struct FloquetBasis{
             )
         end
         precompute = isnothing(precompute) ? Float64[] : Float64.(precompute)
+        T = Float64(T)
         # enforce `precompute` interval rule
         precompute = _to_period_interval(precompute, T)
-        tlist = Float64[0, precompute..., T] |> unique
-        tlist = union(tlist, precompute) # ensure all times in precompute are in tlist
+        # remove 0 from precompute if present, since these timesteps have no micromotion
+        if !isempty(precompute) && precompute[1] == 0.0
+            popfirst!(precompute)
+        end
+        tlist = Float64[0, precompute..., T]
         # assemble integrator kwargs used for propagator
-        kwargs_UT = (kwargs..., saveat=precompute, reltol=reltol_UT)
+        kwargs_UT = (kwargs..., saveat=tlist, reltol=reltol_UT)
         if !isnothing(abstol_UT)
             kwargs_UT = (kwargs_UT..., abstol=abstol_UT)
         end
@@ -128,10 +132,11 @@ struct FloquetBasis{
             tlist;
             params=params,
             alg=alg,
+            saveat=tlist,
             kwargs_UT...
                 )
-        Ulist = sol.states
-        U_T = pop!(Ulist)
+        Ulist = sol.states[2:end-1] # don't put t=0 or t=T in micromotion cache
+        U_T = sol.states[end]
         # tidyup period-propagator and micromotion propagators according to boolean flags
         if tidyup_UT
             tidyup!(U_T, sol.abstol)
@@ -233,29 +238,18 @@ DOCSTRING
 # Returns:
 - `fbasis::FloquetBasis`: Floquet basis object for the system evolving under the time-dependent Hamiltonian `H`.
 """
-#function FloquetBasis(
-#H::AbstractQuantumObject,
-#T::TP;
-#params::PP=nothing,
-#alg::AbstractODEAlgorithm = Vern7(lazy = false),
-#kwargs::Dict=Dict()
-#) where {TP<:Real, PP}
-#precompute = Float64[]
-#return FloquetBasis(H, T, precompute; params=params, alg=alg, kwargs=kwargs)
-#end
-
 
 function memoize_micromotion!(
     fb::FloquetBasis,
-    tlist::AbstractVector{<:Real};
+    tlist::AbstractVector;
     kwargs...
     )
     tlist = _to_period_interval(tlist, fb.T)
     propagator!(fb, tlist; kwargs...)
 end
 
-function memoize_micromotion!(fb::FloquetBasis, t::Float64, U::QuantumObject{Operator})
-    t = _to_period_interval(t, fb.T)
+function memoize_micromotion!(fb::FloquetBasis, t::Float64, U::QuantumObject)
+    t = mod(t, fb.T)
     t_idx = findfirst(x -> x>t, fb.precompute)
     t_idx = isnothing(t_idx) ? length(fb.precompute) + 1 : t_idx
     insert!(fb.precompute, t_idx, t)
@@ -264,77 +258,244 @@ end
 
 function memoize_micromotion!(
     fb::FloquetBasis,
-    tlist::AbstractVector{<:Real},
-    Ulist::AbstractVector{QuantumObject{Operator}}
+    tlist::AbstractVector,
+    Ulist::AbstractVector{<:AbstractQuantumObject}
     )
     for (t, U) in zip(tlist, Ulist)
         memoize_micromotion!(fb, t, U)
     end
 end
 
+
+######## Propagator refactor
+
+
+function is_memoized(fb::FloquetBasis, t::Real)
+    return t==zero(t) || Float64(t)==fb.T || mod(t, fb.T) ∈ fb.precompute
+end
+
+function _from_micromotion_cache(fb::FloquetBasis, t::Real)
+    if is_memoized(fb, t)
+        t = mod(t, fb.T)
+        return t==zero(t) ?
+            qeye_like(fb) : fb.Ulist[findfirst(==(t), fb.precompute)]
+    else
+        return nothing
+    end
+end
+
+function _compute_micromotion(
+    fb::FloquetBasis,
+    tlist::AbstractVector,
+    pbar::Bool;
+    kwargs...
+    )
+    # send tlist to period interval
+    # NOTE: order of timesteps may change if any timestep is outside the
+    # interval [0,T)
+    trem_list = _to_period_interval(tlist, fb.T)
+    # ensure that first timestep is zero for proper convergence
+    t0 = trem_list[1]
+    solver_t = t0 == zero(t0) ? trem_list : [zero(t0), trem_list...]
+    # calculate micromotion propagators
+    U_micros = sesolve(
+        fb.H,
+        qeye_like(fb),
+        solver_t;
+        alg=fb.alg,
+        progress_bar=Val(pbar),
+        kwargs...
+    ).states
+    # remove zero timestep if it was added
+    if t0 != zero(t0)
+        popfirst!(U_micros)
+    end
+    # micromotion list is in order of t_rem
+    # send to tlist ordering
+    U_micros = U_micros[indexin(mod.(tlist,fb.T), trem_list)]
+    return U_micros
+end
+
+function _get_micromotion(
+    fb::FloquetBasis,
+    tlist::AbstractVector,
+    pbar::Bool;
+    precomputed_only::Bool=false,
+    kwargs...
+    )
+    # initialize list of micromotion propagators
+    Ulist = Vector{QuantumObject}(undef, length(tlist))
+    # get memoized propagators
+    Umem = [_from_micromotion_cache(fb, t) for t in tlist]
+    # get uncached timesteps
+    isnew = isnothing.(Umem)
+    tnew = tlist[isnew]
+    # check to see if new micromotion is needed and allowed
+    if precomputed_only && !isempty(tnew)
+        throw(
+            ErrorException(
+                "Keyword argument `precomputed_only` set to true, "*
+                    "but micromotion propagators for timesteps $tnew "*
+                    "are not precomputed in FloquetBasis argument"
+            )
+        )
+
+    end
+    # remove `nothing` elements from Umem
+    Umem = all(isnew) ? [] : Umem[.~isnew]
+    # compute new micromotion
+    Unew = any(isnew) ?  _compute_micromotion(fb, tnew, pbar; kwargs...) : []
+    # populate return array
+    for (Us, idxs) in zip([Unew, Umem], [isnew, .~isnew])
+        if any(idxs)
+            Ulist[idxs] = Us
+        end
+    end
+    return Ulist, Unew, tnew
+end
+
+function _get_interperiod_prop(
+    fb::FloquetBasis,
+    tlist::AbstractVector
+    )
+    # get period counts for each timestep
+    nT_list = fld.(tlist, fb.T)
+    # avoid repeating matrix exponentiations
+    nT_unq = unique(nT_list)
+    # propagate over periods
+    UnT = map(nT -> fb.U_T^nT, nT_unq)
+    # re-add repeated propagators if needed
+    UnT = nT_list.size == nT_unq.size ? UnT : UnT[indexin(nT_list, nT_unq)]
+    return UnT
+end
+
+function _proplist(
+    fb::FloquetBasis,
+    tlist::AbstractVector,
+    pbar::Bool;# TODO: Change to Val consistent with rest of QT.jl
+    kwargs...
+    )
+    pbar ? println("Calcuating Micromotion Propagators") : nothing
+    Umicro_list, Unew_list, tnew = _get_micromotion(
+        fb,
+        tlist,
+        pbar;
+        kwargs...
+    )
+    pbar ? println("Finished.") : nothing
+    UnT_list = _get_interperiod_prop(fb, tlist)
+    # compute total propagators
+    Utot = [Umicro * UnT for (Umicro, UnT) in zip(Umicro_list, UnT_list)]
+    return Utot, UnT_list, Umicro_list, Unew_list, tnew
+end
+
+
+function propagator(
+    fb::FloquetBasis,
+    tlist::AbstractVector;
+    progress_bar::Bool=false,
+    kwargs...)
+    return _proplist(fb, tlist, progress_bar; kwargs...)[1]
+end
+
+function propagator!(
+    fb::FloquetBasis,
+    tlist::AbstractVector;
+    progress_bar::Bool=false,
+    kwargs...
+    )
+    Ulist, _, _, Unew, tnew = _proplist(fb, tlist, progress_bar; kwargs...)
+    if !isempty(tnew)
+        memoize_micromotion!(fb, tnew, Unew)
+    end
+    return Ulist
+end
+
+
 function propagator(fb::FloquetBasis, t::Real; kwargs...)
-    return propagator(fb, 0, t; kwargs...)
+    return propagator(fb, [t]; kwargs...)[end]
 end
 
 function propagator!(fb::FloquetBasis, t::Real; kwargs...)
-    return propagator!(fb, 0.0, Float64(t); kwargs...)
+    return propagator!(fb, [t]; kwargs...)[end]
 end
 
-
-function propagator(fb::FloquetBasis, t0::TI, tf::TF; kwargs...) where {TI<:Real, TF<:Real}
-    t0, tf = Float64[t0, tf] # ensure timepoints are Float64
-    U0, U_nT, U_intra = _prop_list(fb, t0, tf; kwargs...)
-    return U_intra * U_nT * U0'
-end
-
-# TODO: Current implementation of Propagator makes fsesolve slower than sesolve.
-# This can be fixed by forcing fesolve to make only one call to sesolve, in which
-# all required uncached micromotion operators are calculated in that single call.
-
-function propagator!(fb::FloquetBasis, t0::TI, tf::TF; kwargs) where{TI<:Real, TF<:Real}
-    t0, tf = Float64[t0, tf] # ensure timepoints are Float64
-    U0, U_nT, U_intra = _prop_list(fb, t0, tf; kwargs...)
-    t0_T, tf_T = mod.([t0, tf], fb.T)
-    for (tp, U) in [(t0_T, U0), (tf_T, U_intra)]
-        if !(tp==0 || tp∈fb.precompute)
-            memoize_micromotion!(fb, tp, U)
-        end
-    end
-    return U_intra * U_nT * U0'
-end
-
-function _prop_list(fb::FloquetBasis, t0::Float64, tf::Float64; kwargs...)
-    U0 = (t0 == 0.0) ? qeye_like(fb.H, Val(true)) : propagator(fb, 0.0, t0; kwargs...)
-    nT, t_rem = fldmod(tf, fb.T)
-    U_nT = fb.U_T^nT
-    if t_rem == 0.0
-        U_intra = qeye_like(fb.H, Val(true))
-    elseif t_rem∈fb.precompute
-        t_idx = findfirst(x->x==t_rem, fb.precompute)
-        U_intra = fb.Ulist[t_idx]
+function propagator(fb::FloquetBasis, t0::Real, tf::Real; kwargs...)
+    Ulist = propagator(fb, [t0, tf]; kwargs...)
+    if t0==zero(t0)
+        return Ulist[end]
     else
-        if haskey(kwargs, :memoized_only) && kwargs[:memoized_only]
-            throw(
-                ErrorException(
-                    "`memoized_only` keyword argument set to `true`, but "*
-                        "the micromotion propagatoo `tf=$tf` "*
-                        "is not memoized in fb."
-                )
-            )
-        end
-        tlist = Float64[0.0, t_rem]
-        kwargs = Dict(fb.kwargs..., kwargs...)
-        U_intra = sesolve(
-            fb.H,
-            qeye_like(fb.H, Val(true)),
-            tlist;
-            alg=fb.alg,
-            progress_bar=Val(false),
-            kwargs...
-                ).states[end]
+        # Ulist contains propagators [U(0, t0), U(0, tf)]
+        # Return U(t0, tf) = U(0, tf) * U'(0, t0)
+        return Ulist[end] * Ulist[1]'
     end
-    return U0, U_nT, U_intra
 end
+
+function propagator!(fb::FloquetBasis, t0::Real, tf::Real; kwargs...)
+    Ulist = propagator!(fb, [t0, tf]; kwargs...)
+    if t0==zero(t0)
+        return Ulist[end]
+    else
+        # Ulist contains propagators [U(0, t0), U(0, tf)]
+        # Return U(t0, tf) = U(0, tf) * U'(0, t0)
+        return Ulist[end] * Ulist[1]'
+    end
+end
+#
+#function propagator(fb::FloquetBasis, t0::TI, tf::TF; kwargs...) where {TI<:Real, TF<:Real}
+#t0, tf = Float64[t0, tf] # ensure timepoints are Float64
+#U0, U_nT, U_intra = _prop_list(fb, t0, tf; kwargs...)
+#return U_intra * U_nT * U0'
+#end
+#
+## TODO: Current implementation of Propagator makes fsesolve slower than sesolve.
+## This can be fixed by forcing fesolve to make only one call to sesolve, in which
+## all required uncached micromotion operators are calculated in that single call.
+#
+#function propagator!(fb::FloquetBasis, t0::TI, tf::TF; kwargs) where{TI<:Real, TF<:Real}
+#t0, tf = Float64[t0, tf] # ensure timepoints are Float64
+#U0, U_nT, U_intra = _prop_list(fb, t0, tf; kwargs...)
+#t0_T, tf_T = mod.([t0, tf], fb.T)
+#for (tp, U) in [(t0_T, U0), (tf_T, U_intra)]
+#if !(tp==0 || tp∈fb.precompute)
+#memoize_micromotion!(fb, tp, U)
+#end
+#end
+#return U_intra * U_nT * U0'
+#end
+#
+#function _prop_list(fb::FloquetBasis, t0::Float64, tf::Float64; kwargs...)
+#U0 = (t0 == 0.0) ? qeye_like(fb.H, Val(true)) : propagator(fb, 0.0, t0; kwargs...)
+#nT, t_rem = fldmod(tf, fb.T)
+#U_nT = fb.U_T^nT
+#if t_rem == 0.0
+#U_intra = qeye_like(fb.H, Val(true))
+#elseif t_rem∈fb.precompute
+#t_idx = findfirst(x->x==t_rem, fb.precompute)
+#U_intra = fb.Ulist[t_idx]
+#else
+#if haskey(kwargs, :memoized_only) && kwargs[:memoized_only]
+#throw(
+#ErrorException(
+#"`memoized_only` keyword argument set to `true`, but "*
+#"the micromotion propagatoo `tf=$tf` "*
+#"is not memoized in fb."
+#)
+#)
+#end
+#tlist = Float64[0.0, t_rem]
+#kwargs = Dict(fb.kwargs..., kwargs...)
+#U_intra = sesolve(
+#fb.H,
+#qeye_like(fb.H, Val(true)),
+#tlist;
+#alg=fb.alg,
+#progress_bar=Val(false),
+#kwargs...
+#).states[end]
+#end
+#return U0, U_nT, U_intra
+#end
 
 """
     fsesolve(
@@ -395,24 +556,24 @@ function _fsesolve(
     if !(progress_bar isa Bool)
         progress_bar = typeof(progress_bar).parameters[1]
     end
-    if progress_bar
-        pbar = Progress(length(tlist), showspeed=true)
-    end
-    for (step, t) in enumerate(tlist)
-        if t==0
-            U = qeye_like(fb.H, Val(true))
-        else
-            U = pfunc(fb, 0, t; kwargs...)
-        end
+    # get propagators
+    Ulist = pfunc(fb, tlist; progress_bar=progress_bar, kwargs...)
+    # get indices of timesteps at which to store state
+    state_idxs = indexin(tlist, sol.times_states)
+
+    # collect expval at each t (if e_ops not Nothing) and state at every :saveat
+    for (tstep, U) in enumerate(Ulist)
+        # propagate state
         ψt = U * ψ0
-        state_idx = findfirst(x->x==t, sol.times_states)
-        if !isnothing(state_idx)
-            sol.states[state_idx] = ψt
-        end
+        # get expvals
         if !isempty(sol.expect)
-            sol.expect[step,:] = expect.(e_ops, ψt)
+            sol.expect[tstep, :] = [expect(eop, ψt) for eop in e_ops]
         end
-        progress_bar ? next!(pbar) : nothing
+        # save state if timestep in :saveat
+        ψ_idx = state_idxs[tstep]
+        if !isnothing(ψ_idx)
+            sol.states[ψ_idx] = ψt
+        end
     end
     return sol
 end
