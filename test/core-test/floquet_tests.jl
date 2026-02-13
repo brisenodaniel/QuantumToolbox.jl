@@ -96,6 +96,38 @@ end
 end
 
 
+@testitem "Test Floquet Fluxonium" begin
+
+    
+    struct Fluxonium
+        EL::Float64 # inductive energy
+        EC::Float64 # charging energy
+        EJ::Float64 # Josephson energy
+        bare_levels::Int64 # bare LC levels
+        Φ::Float64 # External reduced flux in units of flux quantum
+    end
+
+    function fluxonium(E_L::Float64, E_C::Float64, E_J::Float64, bare_levels::Int64, Φ::Float64)::Fluxonium
+        Fluxonium(E_L, E_C, E_J, bare_levels, Φ)
+    end
+
+    function Hfl(f::Fluxonium)::QuantumObject
+        ϕ = position(f.bare_levels)
+        n = momentum(f.bare_levels)
+        Hfl = 4f.EC * n^2 + 1 / 2 * f.EL * (ϕ + 2π * f.Φ)^2 - f.EJ * cos(ϕ)
+    end
+
+    function Hevofl(f::Fluxonium, ω::Float64)
+        ϕ = position(f.bare_levels)
+        g(t) = cos(ω*t)
+        Hdr = 0.5*f.EL*ϕ
+        return (Hfl(f), (Hdr, g))
+    end
+
+
+
+end
+
 
 #test Kerr-cat (working in progress)
 @testitem "Test Floquet Kerr cat" begin

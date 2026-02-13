@@ -66,10 +66,11 @@ lines!(ax, A_vec ./ par1.ω, q_energies[:,2] ./ par1.δ, color = :red)
 
 fig |> display
 
-@doc raw """
-discuss what to and from floquet basis actually do..... and how you can just use fsesolve
-
-"""
+#@doc raw """
+#The state of the quantum system at any time can be written in terms of the floquet modes, see Eq. (xx). The modes and the
+#quasienergies can be calculated as mentioned above. The coeffients ``c_\alpha`` can be calculated using the t_floquet_basis
+#function as
+#"""
     
 #Third box
 par3 = (ϵ0 = par1.ϵ0, δ = par1.δ, A = 0.5 * 2 * π, ω = par1.ω)
@@ -77,6 +78,12 @@ psi0 = basis(2,0)
 
 fb3 = FloquetBasis(Hevoz(par3),T)
 f_coef3 = to_floquet_basis(fb3, psi0, 0.0)
+
+#@doc raw """
+#Using the coefficients, one can obtain the floquet states employing the from_floquet_basis function. These states, in turn, 
+#can be used to calculate the expectation values of observables at time t:
+#"""
+
 p_ex3 = [real.(expect(num(2), from_floquet_basis(fb3, f_coef3, t))) for t in tlist]
 
 solution3 = sesolve(Hevoz(par3), psi0, tlist)
