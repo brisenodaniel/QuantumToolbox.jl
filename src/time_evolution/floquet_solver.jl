@@ -617,21 +617,65 @@ function states(fb::FloquetBasis, ::Val{false}=Val(false); kwargs...)
 end
 
 
-function _states(fb::FloquetBasis, t::Real, pfunc::Function; kwargs...)
-    # This function is defined to avoid code-repetition when defining mode and
-    # state access methods with and without side-effects. The micromotion operator
-    # caching is determined through the parameter function pfunc
+function _states(
+    fb::FloquetBasis,
+    tlist::AbstractVector{<:Real},
+    pfunc::Function;
+    kwargs...
+    )
     U0 = modes(fb, Val(true))
-    if t == zero(t)
-        return U0
-    else
-        Ut = pfunc(fb, t; kwargs...).data
-        return Ut * U0
-    end
+    Uts = [U.data for U in pfunc(fb, tlist; kwargs...)]
+    ψts = Uts .* Ref(U0)
+    tlist[1] == zero(tlist[1]) ? ψts[1] = U0 : nothing
+    return ψts
 end
+
+function _states(
+    fb::FloquetBasis,
+    t::Real,
+    pfunc::Function;
+    kwargs...
+    )
+    return _states(fb, [t], pfunc; kwargs...)[1]
+end
+
+
+#function _states(fb::FloquetBasis, t::Real, pfunc::Function; kwargs...)
+    ## This function is defined to avoid code-repetition when defining mode and
+    ## state access methods with and without side-effects. The micromotion operator
+    ## caching is determined through the parameter function pfunc
+    #U0 = modes(fb, Val(true))
+    #if t == zero(t)
+        #return U0
+    #else
+        #Ut = pfunc(fb, t; kwargs...).data
+        #return Ut * U0
+    #end
+#end
 
 ######## Get States and Modes at t>0
 ## No side-effects
+
+function states(
+    fb::FloquetBasis,
+    tlist::AbstractVector{<:Real},
+    ::Val{true};
+    kwargs...
+    )
+    return _states(fb, tlist, propagator; kwargs...)
+end
+
+function states(
+    fb::FloquetBasis,
+    tlist::AbstractVector{<:Real},
+    ::Val{false} = Val(false);
+    kwargs...
+    )
+    return [_data_to_ketlist(ψt, fb.dims)
+            for ψt in _states(fb, tlist, propagator; kwargs...)]
+end
+
+
 function states(fb::FloquetBasis, t::Real, ::Val{true}; kwargs...)
     return _states(fb, t, propagator; kwargs...)
 end
@@ -639,6 +683,26 @@ end
 function states(fb::FloquetBasis, t::Real, ::Val{false}=Val(false); kwargs...)
     return _states(fb, t, propagator; kwargs...) |>
         M -> _data_to_ketlist(M, fb.dims)
+end
+
+function modes(
+    fb::FloquetBasis,
+    tlist::AbstractVector{<:Real},
+    ::Val{true};
+    kwargs...)
+    state_mtrxs = states(fb, tlist, Val(true); kwargs...)
+    return [_state_mtrx_to_mode(ψt, fb.equsi, t)
+            for (t, ψt) in zip(tlist, state_mtrxs)]
+end
+
+function modes(
+    fb::FloquetBasis,
+    tlist::AbstractVector{<:Real},
+    ::Val{false}=Val(false);
+    kwargs...
+    )
+    return [_data_to_ketlist(ut, fb.dims)
+            for ut in modes(fb, tlist, Val(true); kwargs...)]
 end
 
 function modes(fb::FloquetBasis, t::Real, ::Val{true}; kwargs...)
@@ -652,6 +716,26 @@ function modes(fb::FloquetBasis, t::Real, ::Val{false}=Val(false); kwargs...)
 end
 
 ## Side effect: Cache previously uncalculated micromotion operators to FloquetBasis
+##
+##
+function states!(
+    fb::FloquetBasis,
+    tlist::AbstractVector{<:Real},
+    ::Val{true};
+    kwargs...
+    )
+    return _states(fb, tlist, propagator!; kwargs...)
+end
+
+function states!(
+    fb::FloquetBasis,
+    tlist::AbstractVector{<:Real},
+    ::Val{false} = Val(false);
+    kwargs...
+    )
+    return [_data_to_ketlist(ψt, fb.dims)
+            for ψt in _states(fb, tlist, propagator!; kwargs...)]
+end
 
 function states!(fb::FloquetBasis, t::Real, ::Val{true}; kwargs...)
     return _states(fb, t, propagator!; kwargs...)
