@@ -691,7 +691,7 @@ function modes(
     ::Val{true};
     kwargs...)
     state_mtrxs = states(fb, tlist, Val(true); kwargs...)
-    return [_state_mtrx_to_mode(ψt, fb.equsi, t)
+    return [_state_mtrx_to_mode(ψt, fb.equasi, t)
             for (t, ψt) in zip(tlist, state_mtrxs)]
 end
 
