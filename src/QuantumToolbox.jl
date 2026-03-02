@@ -1,8 +1,8 @@
 module QuantumToolbox
 
 ########## >>>>>>>>> REMOVE BEFORE PULL REQUEST >>>>>>>>>>>>>>>>>>
-using Revise
-using Debugger
+#using Revise
+#using Debugger
 ########## <<<<<<<< REMOVE BEFORE PULL REQUEST <<<<<<<<<<<<<<<<<<<
 
 ## Standard Julia libraries
