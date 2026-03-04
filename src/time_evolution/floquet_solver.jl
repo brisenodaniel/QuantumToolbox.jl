@@ -58,13 +58,14 @@ struct FloquetEvolutionSol{
     TT2<:AbstractVector,
     TQ<: AbstractQuantumObject,
     TS<:AbstractVector{TQ},
+    TE,
     AlgT<:AbstractODEAlgorithm,
     TolT<:Real
 }
     times::TT1
     times_states::TT2
     states::TS
-    expect::AbstractVector{ComplexF64}
+    expect::AbstractArray{TE}
     alg::AlgT
     abstol_UT::TolT
     reltol_UT::TolT
@@ -93,21 +94,22 @@ struct FloquetBasis{
     TQ<:AbstractQuantumObject,
     TS<:AbstractQuantumObject,
     TA<:AbstractODEAlgorithm,
+    TZ<:Complex,
     PP,
 }
     H::Union{Qobj, QobjEvo}
     T::Float64
-    precompute::AbstractVector{Float64}
+    precompute::Vector{Float64}
     U_T::Qobj
-    ψfl0::AbstractVector{TS}
-    U0::AbstractArray{ComplexF32}
-    Ulist::AbstractVector{TQ}
-    equasi::AbstractVector{Float64}
+    ψfl0::Vector{TS}
+    U0::Matrix{TZ}
+    Ulist::Vector{TQ}
+    equasi::Vector{Float64}
     alg::TA
     abstol_UT::Float64
     reltol_UT::Float64
     params::PP
-    kwargs::Union{Dict, NamedTuple}
+    kwargs::NamedTuple
 
     @doc raw"""
         FloquetBasis(H::AbstractQuantumObject, T::Real, tlist::AbstractVector{Real}, precompute::Bool = true; kwargs::Dict = Dict())
@@ -138,8 +140,7 @@ struct FloquetBasis{
         tidyup_micromotion::Bool=false, # set noise floor of micromotion operators at abstol of solver
         kwargs...
         ) where {PP}
-        # create editable version of kwargs
-        kwargs = Dict{Symbol, Any}(kwargs)
+        kwargs = (; kwargs...)
         if T<=0
             throw(
                 ArgumentError("`T` must be a nonzero positive real number")
@@ -166,7 +167,6 @@ struct FloquetBasis{
             tlist;
             params=params,
             alg=alg,
-            saveat=tlist,
             kwargs_UT...
                 )
         Ulist = sol.states[2:end-1] # don't put t=0 or t=T in micromotion cache
@@ -180,9 +180,9 @@ struct FloquetBasis{
         end
         # solve for quasienergies
         equasi, ψfl0, U0 = quasienergy_sort(U_T, T)
-        TQ, TS, TA = eltype(Ulist), eltype(ψfl0), typeof(sol.alg)
+        TQ, TS, TA, TZ = eltype(Ulist), eltype(ψfl0), typeof(sol.alg), eltype(U0)
 
-        new{TQ, TS, TA, PP}(
+        new{TQ, TS, TA, TZ, PP}(
             H,
             Float64(T),
             precompute,
