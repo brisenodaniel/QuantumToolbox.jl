@@ -25,9 +25,10 @@ end
 
 
 struct FloquetEvolutionSol{
-    TT1<:AbstractVector{<:Real},
-    TT2<:AbstractVector{<:Real},
-    TS<:AbstractVector{<:AbstractQuantumObject},
+    TT1<:AbstractVector,
+    TT2<:AbstractVector,
+    TQ<: AbstractQuantumObject,
+    TS<:AbstractVector{TQ},
     AlgT<:AbstractODEAlgorithm,
     TolT<:Real
 }
@@ -60,10 +61,10 @@ Julia struct containing propagators, quasienergies, and Floquet states for a sys
 - `params::AbstractVector` : Additional parameters for the time-dependent Hamiltonian to be used in sesolve.
 """
 struct FloquetBasis{
-    TQ<:AbstractVector{<:AbstractQuantumObject},
+    TQ,
     PP,
 }
-    H::AbstractQuantumObject
+    H::Union{Qobj, QobjEvo}
     T::Float64
     precompute::AbstractVector{Float64}
     U_T::Qobj
@@ -95,7 +96,7 @@ struct FloquetBasis{
     function FloquetBasis(
         H::AbstractQuantumObject,
         T::Real,
-        precompute::Union{AbstractVector{<:Real}, Nothing}=nothing;
+        precompute::Union{AbstractVector, Nothing}=nothing;
         params::PP=nothing,
         alg::AbstractODEAlgorithm = Vern7(lazy = false),
         reltol_UT::Real=1e-12, # smaller tolerance for error when computing period-prop
@@ -179,7 +180,7 @@ end
 
 function _init_FloquetEvolutionSol(
     fb::FloquetBasis,
-    tlist::AbstractVector{<:Real},
+    tlist::AbstractVector,
     e_ops::Union{Nothing, AbstractVector, Tuple} = nothing;
     kwargs...
 )
@@ -619,7 +620,7 @@ end
 
 function _states(
     fb::FloquetBasis,
-    tlist::AbstractVector{<:Real},
+    tlist::AbstractVector,
     pfunc::Function;
     kwargs...
     )
@@ -658,7 +659,7 @@ end
 
 function states(
     fb::FloquetBasis,
-    tlist::AbstractVector{<:Real},
+    tlist::AbstractVector,
     ::Val{true};
     kwargs...
     )
@@ -667,7 +668,7 @@ end
 
 function states(
     fb::FloquetBasis,
-    tlist::AbstractVector{<:Real},
+    tlist::AbstractVector,
     ::Val{false} = Val(false);
     kwargs...
     )
@@ -687,7 +688,7 @@ end
 
 function modes(
     fb::FloquetBasis,
-    tlist::AbstractVector{<:Real},
+    tlist::AbstractVector,
     ::Val{true};
     kwargs...)
     state_mtrxs = states(fb, tlist, Val(true); kwargs...)
@@ -697,7 +698,7 @@ end
 
 function modes(
     fb::FloquetBasis,
-    tlist::AbstractVector{<:Real},
+    tlist::AbstractVector,
     ::Val{false}=Val(false);
     kwargs...
     )
@@ -720,7 +721,7 @@ end
 ##
 function states!(
     fb::FloquetBasis,
-    tlist::AbstractVector{<:Real},
+    tlist::AbstractVector,
     ::Val{true};
     kwargs...
     )
@@ -729,7 +730,7 @@ end
 
 function states!(
     fb::FloquetBasis,
-    tlist::AbstractVector{<:Real},
+    tlist::AbstractVector,
     ::Val{false} = Val(false);
     kwargs...
     )
