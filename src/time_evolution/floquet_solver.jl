@@ -9,6 +9,20 @@ function _to_period_interval(tlist::AbstractVector, T::Real)
     return tlist
 end
 
+function quasienergy_sort(
+    U_T::AbstractQuantumObject,
+    T::Real;
+    )
+    # uns for unsorted
+    ens, ψfl0_uns, U0_uns = eigenstates(U_T)
+    ε_uns = angle.(ens) ./ T
+    # sort
+    P = sortperm(ε_uns)
+    ε = ε_uns[P]
+    ψfl0 = ψfl0_uns[P]
+    U0 = _state_mtrx_to_mode(U0_uns[:, P], ε, T)
+    return ε, ψfl0, U0
+end
 
 function qeye_like(A::QobjEvo, ::Val{true})
     basis_dim = size(A)[1]
@@ -23,6 +37,21 @@ function qeye_like(A::QuantumObject, ::Val{T}) where {T}
     return qeye_like(A)
 end
 
+
+
+function _data_to_ketlist(M::AbstractMatrix, dims::DT) where {DT<:AbstractVector{Int}}
+    M_list = eachcol(M) |> collect
+    ψ_list = Qobj.(M_list, dims=dims)
+    return ψ_list
+end
+
+function _state_mtrx_to_mode(
+    M::AbstractMatrix,
+    equasi::AbstractVector{Float64},
+    t::Float64)
+    ϕ_mat = exp.(1im * t .* equasi) |> Diagonal
+    return ϕ_mat * M
+end
 
 struct FloquetEvolutionSol{
     TT1<:AbstractVector,
@@ -61,16 +90,20 @@ Julia struct containing propagators, quasienergies, and Floquet states for a sys
 - `params::AbstractVector` : Additional parameters for the time-dependent Hamiltonian to be used in sesolve.
 """
 struct FloquetBasis{
-    TQ,
+    TQ<:AbstractQuantumObject,
+    TS<:AbstractQuantumObject,
+    TA<:AbstractODEAlgorithm,
     PP,
 }
     H::Union{Qobj, QobjEvo}
     T::Float64
     precompute::AbstractVector{Float64}
     U_T::Qobj
-    Ulist::TQ
+    ψfl0::AbstractVector{TS}
+    U0::AbstractArray{ComplexF32}
+    Ulist::AbstractVector{TQ}
     equasi::AbstractVector{Float64}
-    alg::AbstractODEAlgorithm
+    alg::TA
     abstol_UT::Float64
     reltol_UT::Float64
     params::PP
@@ -146,14 +179,16 @@ struct FloquetBasis{
             tidyup!.(Ulist, sol.abstol)
         end
         # solve for quasienergies
-        period_phases = eigenenergies(U_T)
-        equasi = angle.(period_phases) ./ T |> sort
+        equasi, ψfl0, U0 = quasienergy_sort(U_T, T)
+        TQ, TS, TA = eltype(Ulist), eltype(ψfl0), typeof(sol.alg)
 
-        new{typeof(Ulist), PP}(
+        new{TQ, TS, TA, PP}(
             H,
             Float64(T),
             precompute,
             U_T,
+            ψfl0,
+            U0,
             Ulist,
             equasi,
             sol.alg,
@@ -582,25 +617,10 @@ end
 
 ###### State and Mode helper functions
 
-function _data_to_ketlist(M::AbstractMatrix, dims::DT) where {DT<:AbstractVector{Int}}
-    M_list = eachcol(M) |> collect
-    ψ_list = Qobj.(M_list, dims=dims)
-    return ψ_list
-end
-
-function _state_mtrx_to_mode(
-    M::AbstractMatrix,
-    equasi::AbstractVector{Float64},
-    t::Float64)
-    ϕ_mat = exp.(1im * t .* equasi) |> Diagonal
-    return ϕ_mat * M
-end
-
 ######## Get  modes at time 0
 
 function modes(fb::FloquetBasis, ::Val{true}; kwargs...)
-    _, _, U0 = eigenstates(fb.U_T)
-    return _state_mtrx_to_mode(U0, fb.equasi, fb.T)
+    return fb.U0
 end
 
 function modes(fb::FloquetBasis, ::Val{false}=Val(false); kwargs...)
