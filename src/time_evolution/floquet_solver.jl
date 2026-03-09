@@ -50,7 +50,7 @@ function _state_mtrx_to_mode(
     equasi::AbstractVector{Float64},
     t::Float64)
     ϕ_mat = exp.(1im * t .* equasi) |> Diagonal
-    return ϕ_mat * M
+    return M * ϕ_mat
 end
 
 struct FloquetEvolutionSol{
