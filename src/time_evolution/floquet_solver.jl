@@ -20,7 +20,7 @@ function quasienergy_sort(
     P = sortperm(ε_uns)
     ε = ε_uns[P]
     ψfl0 = ψfl0_uns[P]
-    U0 = _state_mtrx_to_mode(U0_uns[:, P], ε, T)
+    U0 = U0_uns[:, P]
     return ε, ψfl0, U0
 end
 
