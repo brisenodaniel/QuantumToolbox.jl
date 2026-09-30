@@ -170,3 +170,68 @@ end
 end
 
 
+# Regression test: micromotion propagators must not be cached more than once per
+# in-period time, whether the duplicate arrives within one call, across calls,
+# as t + kT, or through floating-point noise in mod(t + kT, T).
+@testitem "Test Floquet micromotion cache has no duplicates" begin
+    N = 3
+    a = destroy(N)
+    Ht = QobjEvo(num(N) + (a + a'), (p, t) -> cos(t))
+    T = 2π
+    psi0 = rand_ket(N)
+
+    function check_cache(fb)
+        @test length(fb.precompute) == length(fb.Ulist)
+        @test issorted(fb.precompute)
+        @test allunique(fb.precompute)
+        # no two entries closer than the cache tolerance
+        @test all(diff(fb.precompute) .> 1e-12)
+        @test all(0 .< fb.precompute .< fb.T)
+    end
+
+    # same time repeated within a single call
+    fb = FloquetBasis(Ht, T)
+    propagator!(fb, [1.0, 1.0, 1.0]; progress_bar = false)
+    @test length(fb.precompute) == 1
+    check_cache(fb)
+
+    # same time requested again in a later call is a cache hit
+    propagator!(fb, [1.0]; progress_bar = false)
+    @test length(fb.precompute) == 1
+
+    # t and t + T map to the same in-period time
+    fb = FloquetBasis(Ht, T)
+    propagator!(fb, [2.0, 2.0 + T, 2.0 + 3T]; progress_bar = false)
+    @test length(fb.precompute) == 1
+    check_cache(fb)
+
+    # floating-point noise: mod(0.7 + kT, T) is not bit-identical to 0.7
+    fb = FloquetBasis(Ht, T)
+    for k in 1:6
+        propagator!(fb, [0.7 + k * T]; progress_bar = false)
+    end
+    @test length(fb.precompute) == 1
+    check_cache(fb)
+
+    # multiples of T (including t = 0) need no micromotion and must not be cached
+    fb = FloquetBasis(Ht, T)
+    propagator!(fb, [0.0, T, 2T, 5T]; progress_bar = false)
+    @test isempty(fb.precompute)
+    @test isempty(fb.Ulist)
+
+    # fsesolve! on a grid spanning many periods: one entry per distinct in-period time
+    fb = FloquetBasis(Ht, T)
+    tl = collect(range(0, 10T, length = 41)) # 4 points per period
+    fsesolve!(fb, psi0, tl, nothing, false)
+    @test length(fb.precompute) == 3 # T/4, T/2, 3T/4 (t = kT needs no micromotion)
+    check_cache(fb)
+    fsesolve!(fb, psi0, tl, nothing, false)
+    @test length(fb.precompute) == 3
+
+    # deduplication must not change the result
+    fb_ref = FloquetBasis(Ht, T)
+    fb_dup = FloquetBasis(Ht, T)
+    propagator!(fb_dup, [2.0, 2.0 + T]; progress_bar = false)
+    @test propagator(fb_dup, 2.0).data ≈ propagator(fb_ref, 2.0).data
+    @test propagator(fb_dup, 2.0 + 4T).data ≈ propagator(fb_ref, 2.0 + 4T).data
+end

@@ -286,6 +286,11 @@ end
 
 function memoize_micromotion!(fb::FloquetBasis, t::Float64, U::QuantumObject)
     t = mod(t, fb.T)
+    # times equivalent to t=0 have no micromotion, and times already cached
+    # (up to `_MEMOIZE_TOL`) must not be stored twice
+    if t <= _MEMOIZE_TOL || !isnothing(_memoized_index(fb, t))
+        return nothing
+    end
     t_idx = findfirst(x -> x>t, fb.precompute)
     t_idx = isnothing(t_idx) ? length(fb.precompute) + 1 : t_idx
     insert!(fb.precompute, t_idx, t)
@@ -306,15 +311,29 @@ end
 ######## Propagator refactor
 
 
+# Absolute tolerance on in-period times. `mod(t + kT, T)` is generally not
+# bit-identical to `t`, so cache lookups must be tolerance-based.
+const _MEMOIZE_TOL = 1e-12
+
+function _memoized_index(fb::FloquetBasis, t::Real)
+    # `t` must already lie in [0, T); `fb.precompute` is kept sorted
+    idx = searchsortedfirst(fb.precompute, t - _MEMOIZE_TOL)
+    if idx <= length(fb.precompute) && fb.precompute[idx] <= t + _MEMOIZE_TOL
+        return idx
+    end
+    return nothing
+end
+
 function is_memoized(fb::FloquetBasis, t::Real)
-    return t==zero(t) || Float64(t)==fb.T || mod(t, fb.T) ∈ fb.precompute
+    t = mod(t, fb.T)
+    return t <= _MEMOIZE_TOL || !isnothing(_memoized_index(fb, t))
 end
 
 function _from_micromotion_cache(fb::FloquetBasis, t::Real)
     if is_memoized(fb, t)
         t = mod(t, fb.T)
-        return t==zero(t) ?
-            qeye_like(fb) : fb.Ulist[findfirst(==(t), fb.precompute)]
+        return t <= _MEMOIZE_TOL ?
+            qeye_like(fb) : fb.Ulist[_memoized_index(fb, t)]
     else
         return nothing
     end
