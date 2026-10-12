@@ -1,4 +1,4 @@
-export FloquetBasis, FloquetEvolutionSol, propagator, propagator!, fsesolve, fsesolve!, to_floquet_basis, to_floquet_basis!, from_floquet_basis, from_floquet_basis!, modes, modes!, states, states!
+export FloquetBasis, FloquetEvolutionSol, track_quasienergies, propagator, propagator!, fsesolve, fsesolve!, to_floquet_basis, to_floquet_basis!, from_floquet_basis, from_floquet_basis!, modes, modes!, states, states!
 # script helper functions
 function _to_period_interval(tlist::AbstractVector, T::Real)
     # function maps all elements ``t`` in `tlist` outside the interval ``[0, T)`` to an equivalent
@@ -12,16 +12,137 @@ end
 function quasienergy_sort(
     U_T::AbstractQuantumObject,
     T::Real;
+    track::Union{Nothing, NamedTuple}=nothing,
     )
     # uns for unsorted
     ens, ψfl0_uns, U0_uns = eigenstates(U_T)
     ε_uns = -angle.(ens) ./ T
-    # sort
-    P = sortperm(ε_uns)
-    ε = ε_uns[P]
+    if isnothing(track)
+        # sort by quasienergy in the first Floquet zone
+        P = sortperm(ε_uns)
+        ε = ε_uns[P]
+    else
+        # match to the states returned by `track_quasienergies`, and unfold the
+        # quasienergies onto the tracked branches
+        P = _greedy_assignment(abs2.(track.U0' * U0_uns))
+        ε = _unfold_quasienergies(ε_uns[P], track.equasi, T)
+    end
     ψfl0 = ψfl0_uns[P]
     U0 = U0_uns[:, P]
     return ε, ψfl0, U0
+end
+
+function _greedy_assignment(O::AbstractMatrix{<:Real})
+    # returns `P` such that `P[i]` is the column of `O` assigned to row `i`,
+    # repeatedly assigning the largest remaining entry of `O`
+    O = copy(O)
+    N = size(O, 1)
+    P = zeros(Int, N)
+    for _ in 1:N
+        i, j = Tuple(argmax(O))
+        P[i] = j
+        O[i, :] .= -Inf
+        O[:, j] .= -Inf
+    end
+    return P
+end
+
+function _unfold_quasienergies(ε::AbstractVector, ε_ref::AbstractVector, T::Real)
+    # shift each quasienergy by a multiple of ω = 2π/T to the value closest to `ε_ref`
+    ω = 2π / T
+    return ε .+ ω .* round.((ε_ref .- ε) ./ ω)
+end
+
+@doc raw"""
+    track_quasienergies(; H0, H_dr, T, nT=1, δλ=1.0, params=nothing, min_overlap=0.5, alg=Vern7(lazy=false), reltol=1e-12, kwargs...)
+
+Label the Floquet states of ``\hat{H}(t) = \hat{H}_0 + \sum_k f_k(p, t) \hat{H}_k`` by the eigenstate of
+``\hat{H}_0`` that they are adiabatically connected to.
+
+The drive is ramped as ``\hat{H}_\lambda(t) = \hat{H}_0 + \lambda \sum_k f_k(p, t) \hat{H}_k`` for
+``\lambda = 0, \delta\lambda, \dots, 1``. At each step the Floquet states are matched to those of the
+previous step by maximal period-averaged overlap, and the quasienergies are unfolded so that each branch
+is continuous in ``\lambda``, starting from the eigenvalues of ``\hat{H}_0``.
+
+# Arguments:
+- `H0`: Static Hamiltonian.
+- `H_dr`: Vector of drive terms `(f_k, H_k)`, with coefficient functions `f_k(p, t)`.
+- `T`: Drive period.
+- `nT`: Number of equally spaced times in ``[0, T)`` over which overlaps are averaged. The default `nT=1` compares states at ``t=0`` only.
+- `δλ`: Step in the drive-strength ramp. The default `δλ=1` matches the Floquet states directly to the static eigenstates by maximal overlap, which is sufficient for weak drives.
+- `params`: Parameters passed to the coefficient functions `f_k`.
+- `min_overlap`: A warning is raised if any matched overlap in a step is below this value, which indicates that `δλ` should be decreased.
+- `alg`, `reltol`, `kwargs`: Passed to [`sesolve`](@ref) when computing the period propagators.
+
+# Returns:
+A `NamedTuple` with fields
+- `equasi`: Unfolded quasienergies at ``\lambda = 1``, where `equasi[i]` is connected to the `i`-th eigenvalue of `H0` (ascending order).
+- `U0`: Matrix whose `i`-th column is the corresponding Floquet state at ``t = 0``.
+- `λs`: The values of ``\lambda`` used.
+- `equasi_branches`: Matrix whose `(i, k)` entry is the `i`-th quasienergy at `λs[k]`.
+"""
+function track_quasienergies(;
+                             H0::QuantumObject,
+                             H_dr::AbstractVector{<:Tuple{Function, AbstractQuantumObject}},
+                             T::Real,
+                             nT::Int=1,
+                             δλ::Real=1.0,
+                             params::PP=nothing,
+                             min_overlap::Real=0.5,
+                             alg::AbstractODEAlgorithm=Vern7(lazy=false),
+                             reltol::Real=1e-12,
+                             kwargs...
+                             ) where {PP}
+    T > 0 || throw(ArgumentError("`T` must be a nonzero positive real number"))
+    nT >= 1 || throw(ArgumentError("`nT` must be a positive integer"))
+    0 < δλ <= 1 || throw(ArgumentError("`δλ` must lie in the interval (0, 1]"))
+    isempty(H_dr) && throw(ArgumentError("`H_dr` must contain at least one drive term"))
+    # always end the ramp at λ = 1
+    λs = range(0.0, 1.0, length=ceil(Int, 1 / δλ - sqrt(eps())) + 1)
+    # sample nT times in [0, T), plus T for the period propagator
+    tlist = range(0.0, Float64(T), length=nT + 1)
+    # λ = 0: use the eigenstates of H0 directly, since U(T) is degenerate for
+    # static energies that differ by a multiple of 2π/T
+    E, _, V0 = eigenstates(H0)
+    E = real.(E)
+    P = sortperm(E)
+    εref = E[P]
+    Ψref = V0[:, P]
+    # static eigenstates only acquire a phase in time
+    Ψref_t = fill(Ψref, nT)
+    ε_branches = Matrix{Float64}(undef, length(εref), length(λs))
+    ε_branches[:, 1] = εref
+
+    for (k, λ) in enumerate(λs[2:end])
+        H_λ = QobjEvo(Tuple((H_int, (p, t) -> λ * dr(p, t)) for (dr, H_int) in H_dr))
+        Us = sesolve(
+            H0 + H_λ,
+            qeye_like(H0),
+            tlist;
+            params=params,
+            alg=alg,
+            reltol=reltol,
+            progress_bar=Val(false),
+            kwargs...
+        ).states
+        vals, _, V = eigenstates(Us[end])
+        ε = -angle.(vals) ./ T
+        # Floquet states at the sampled times
+        Ψ_t = [U.data * V for U in Us[1:nT]]
+        # period-averaged overlap O[i, j] with the states of the previous step
+        O = sum(abs2.(Ψr' * Ψ) for (Ψr, Ψ) in zip(Ψref_t, Ψ_t)) ./ nT
+        P = _greedy_assignment(O)
+        worst = minimum(O[i, P[i]] for i in eachindex(P))
+        if worst < min_overlap
+            @warn "Minimum matched overlap $(round(worst, digits=3)) at λ = $λ is below " *
+                "`min_overlap = $min_overlap`. The labelling may be unreliable; consider decreasing `δλ`."
+        end
+        εref = _unfold_quasienergies(ε[P], εref, T)
+        Ψref = V[:, P]
+        Ψref_t = [Ψ[:, P] for Ψ in Ψ_t]
+        ε_branches[:, k + 1] = εref
+    end
+    return (; equasi=εref, U0=Ψref, λs=collect(λs), equasi_branches=ε_branches)
 end
 
 function qeye_like(A::QobjEvo, ::Val{true})
@@ -198,7 +319,88 @@ struct FloquetBasis{
             kwargs,
         )
     end
+
+    @doc raw"""
+        FloquetBasis(H0::QuantumObject, H_dr::AbstractVector{<:Tuple{Function, AbstractQuantumObject}}, T::Real, precompute::Union{AbstractVector, Nothing}=nothing; δλ::Real=1.0, nT::Int=1, min_overlap::Real=0.5, kwargs...)
+
+    FloquetBasis for the ``T``-periodic Hamiltonian ``\hat{H}(t) = \hat{H}_0 + \sum_k f_k(p, t) \hat{H}_k``, with
+    quasienergies and Floquet states labelled by the eigenstate of ``\hat{H}_0`` they are adiabatically connected to.
+
+    # Arguments:
+    - `H0`: Static Hamiltonian.
+    - `H_dr`: Vector of drive terms `(f_k, H_k)`, with coefficient functions `f_k(p, t)`.
+    - `T`: Drive period.
+    - `precompute`: Time vector containing points ``t`` at which to store the system propagator ``U(t)``.
+    - `δλ`, `nT`, `min_overlap`: Options for the drive-strength ramp, see [`track_quasienergies`](@ref). The default `δλ=1` assigns each Floquet state to the static eigenstate with which it has maximal overlap, which is sufficient for weak drives.
+    - `kwargs`: Remaining keyword arguments are the same as for `FloquetBasis(H, T, precompute)`, and are also used when computing the propagators of the ramp.
+
+    # Returns:
+    - `fbasis::FloquetBasis`: FloquetBasis object whose `i`-th quasienergy and Floquet state are connected to the `i`-th eigenstate of `H0` (ascending energy). Quasienergies are unfolded onto these branches rather than restricted to ``[-\pi/T, \pi/T)``.
+    """
+    function FloquetBasis(
+        H0::QuantumObject,
+        H_dr::AbstractVector{<:Tuple{Function, AbstractQuantumObject}},
+        T::Real,
+        precompute::Union{AbstractVector, Nothing}=nothing;
+        δλ::Real=1.0,
+        nT::Int=1,
+        min_overlap::Real=0.5,
+        params::PP=nothing,
+        alg::AbstractODEAlgorithm = Vern7(lazy = false),
+        reltol_UT::Real=1e-12,
+        abstol_UT::Union{Real, Nothing}=nothing,
+        kwargs...
+        ) where {PP}
+        H = H0 + QobjEvo(Tuple((H_k, f_k) for (f_k, H_k) in H_dr))
+        fb = FloquetBasis(
+            H,
+            T,
+            precompute;
+            params=params,
+            alg=alg,
+            reltol_UT=reltol_UT,
+            abstol_UT=abstol_UT,
+            kwargs...
+        )
+        # ramp the drive with the same solver settings used for the period propagator
+        kwargs_track = (; (k => v for (k, v) in pairs(kwargs) if k ∉ (:tidyup_UT, :tidyup_micromotion))...)
+        if !isnothing(abstol_UT)
+            kwargs_track = (kwargs_track..., abstol=abstol_UT)
+        end
+        track = track_quasienergies(;
+            H0=H0,
+            H_dr=H_dr,
+            T=T,
+            nT=nT,
+            δλ=δλ,
+            params=params,
+            min_overlap=min_overlap,
+            alg=alg,
+            reltol=reltol_UT,
+            kwargs_track...
+        )
+        # relabel the Floquet states of `fb` by the tracked branches
+        equasi, ψfl0, U0 = quasienergy_sort(fb.U_T, fb.T; track=track)
+        TQ, TS, TA, TZ = eltype(fb.Ulist), eltype(ψfl0), typeof(fb.alg), eltype(U0)
+
+        new{TQ, TS, TA, TZ, PP}(
+            fb.H,
+            fb.T,
+            fb.precompute,
+            fb.U_T,
+            ψfl0,
+            U0,
+            fb.Ulist,
+            equasi,
+            fb.alg,
+            fb.abstol_UT,
+            fb.reltol_UT,
+            params,
+            fb.kwargs,
+        )
+    end
 end
+
 
 function Base.getproperty(fb::FloquetBasis, key::Symbol)
     if key==:dims

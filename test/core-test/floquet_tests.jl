@@ -235,3 +235,96 @@ end
     @test propagator(fb_dup, 2.0).data ≈ propagator(fb_ref, 2.0).data
     @test propagator(fb_dup, 2.0 + 4T).data ≈ propagator(fb_ref, 2.0 + 4T).data
 end
+
+
+# Labelling of Floquet states by adiabatic connection to the eigenstates of a
+# static Hamiltonian H0, through `track_quasienergies` and the
+# `FloquetBasis(H0, H_dr, T)` constructor.
+@testitem "Test Floquet quasienergy tracking: weak drive" begin
+    using LinearAlgebra
+    # columns of A and B are equal up to a phase
+    phase_eq(A, B) = all(abs(abs(dot(A[:, i], B[:, i])) - 1) < 1e-6 for i in 1:size(A, 2))
+
+    # zero drive: quasienergies are the static energies, in static order
+    N = 4
+    a = destroy(N)
+    H0 = num(N) + 0.1 * (a + a')
+    E = sort(real.(eigenenergies(H0)))
+    tr = track_quasienergies(; H0 = H0, H_dr = [((p, t) -> 0.0, a + a')], T = 2π / 3.0)
+    @test tr.equasi ≈ E atol = 1e-8
+    @test size(tr.equasi_branches) == (N, 2)
+
+    # weak off-resonant drive on a two-level system
+    Δ, ω, A = 1.0, 3.0, 0.05
+    T = 2π / ω
+    H0 = 0.5Δ * sigmaz()
+    H_dr = [((p, t) -> A * cos(ω * t), sigmax())]
+    Ht = H0 + QobjEvo(sigmax(), (p, t) -> A * cos(ω * t))
+    E = sort(real.(eigenenergies(H0)))
+
+    # default δλ = 1 (greedy maximal overlap) agrees with a ramp
+    tr = track_quasienergies(; H0 = H0, H_dr = H_dr, T = T)
+    @test all(abs.(tr.equasi .- E) .< 1e-2)
+    tr2 = track_quasienergies(; H0 = H0, H_dr = H_dr, T = T, δλ = 0.1, nT = 8)
+    @test tr2.equasi ≈ tr.equasi atol = 1e-8
+    @test length(tr2.λs) == 11
+
+    # constructor agrees with track_quasienergies
+    fb = FloquetBasis(H0, H_dr, T)
+    @test fb.H isa QobjEvo
+    @test fb.equasi ≈ tr.equasi atol = 1e-8
+    @test phase_eq(fb.U0, tr.U0)
+
+    # precompute and keyword arguments are forwarded
+    fbp = FloquetBasis(H0, H_dr, T, [0.3T, 0.6T]; δλ = 0.5, nT = 4, tidyup_micromotion = true)
+    @test fbp.precompute ≈ [0.3T, 0.6T]
+    @test fbp.equasi ≈ fb.equasi atol = 1e-8
+    @test phase_eq(fbp.U0, fb.U0)
+
+    # same quasienergies (mod ω) as the default constructor
+    fb_def = FloquetBasis(Ht, T)
+    @test sort(mod.(fb.equasi, ω)) ≈ sort(mod.(fb_def.equasi, ω)) atol = 1e-8
+
+    # columns of U0 are eigenvectors of U_T with eigenvalue exp(-iεT)
+    UT = fb.U_T.data
+    @test all(norm(UT * fb.U0[:, i] - exp(-1im * fb.equasi[i] * T) * fb.U0[:, i]) < 1e-8 for i in 1:2)
+
+    # modes are T-periodic and fsesolve matches sesolve
+    m0 = modes(fb, 0.0, Val(true))
+    mT = modes(fb, T, Val(true))
+    @test norm(m0 - mT) < 1e-6
+    ψ0 = basis(2, 0)
+    tl = LinRange(0, 5T, 23)
+    s1 = sesolve(Ht, ψ0, tl; progress_bar = Val(false)).states
+    s2 = fsesolve(fb, ψ0, tl, nothing, Val(false)).states
+    @test all(abs(abs(x' * y) - 1) < 1e-5 for (x, y) in zip(s1, s2))
+end
+
+@testitem "Test Floquet quasienergy tracking: strong drive" begin
+    ω, A = 1.0, 0.8
+    T = 2π / ω
+    H0 = 0.5 * sigmaz()
+    H_dr = [((p, t) -> A * cos(ω * t), sigmax())]
+
+    # a single greedy step is unreliable for a strong resonant drive
+    @test_logs (:warn,) match_mode = :any track_quasienergies(; H0 = H0, H_dr = H_dr, T = T, min_overlap = 0.9)
+
+    # a fine ramp is converged in δλ
+    trA = track_quasienergies(; H0 = H0, H_dr = H_dr, T = T, δλ = 0.02, nT = 8)
+    trB = track_quasienergies(; H0 = H0, H_dr = H_dr, T = T, δλ = 0.01, nT = 8)
+    @test trA.equasi ≈ trB.equasi atol = 1e-6
+    # unfolded branches are continuous in λ
+    @test maximum(abs.(diff(trB.equasi_branches, dims = 2))) < ω / 4
+
+    fb = FloquetBasis(H0, H_dr, T; δλ = 0.01, nT = 8)
+    @test fb.equasi ≈ trB.equasi atol = 1e-6
+
+    # original constructor still returns sorted first-zone quasienergies
+    fb_old = FloquetBasis(H0 + QobjEvo(sigmax(), (p, t) -> A * cos(ω * t)), T)
+    @test issorted(fb_old.equasi)
+    @test all(-π / T .<= fb_old.equasi .<= π / T)
+
+    # argument checks
+    @test_throws ArgumentError track_quasienergies(; H0 = H0, H_dr = H_dr, T = T, δλ = 0.0)
+    @test_throws ArgumentError track_quasienergies(; H0 = H0, H_dr = H_dr, T = T, nT = 0)
+end
