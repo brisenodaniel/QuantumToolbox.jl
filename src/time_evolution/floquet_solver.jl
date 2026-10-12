@@ -122,8 +122,8 @@ function track_quasienergies(;
             params=params,
             alg=alg,
             reltol=reltol,
-            progress_bar=Val(false),
-            kwargs...
+            kwargs...,
+            progress_bar=Val(false), # after kwargs so it cannot be overridden
         ).states
         vals, _, V = eigenstates(Us[end])
         ε = -angle.(vals) ./ T
@@ -360,10 +360,11 @@ struct FloquetBasis{
             alg=alg,
             reltol_UT=reltol_UT,
             abstol_UT=abstol_UT,
-            kwargs...
+            kwargs...,
+            progress_bar=Val(false), # keep tracking quiet, e.g. when run multithreaded
         )
         # ramp the drive with the same solver settings used for the period propagator
-        kwargs_track = (; (k => v for (k, v) in pairs(kwargs) if k ∉ (:tidyup_UT, :tidyup_micromotion))...)
+        kwargs_track = (; (k => v for (k, v) in pairs(kwargs) if k ∉ (:tidyup_UT, :tidyup_micromotion, :progress_bar))...)
         if !isnothing(abstol_UT)
             kwargs_track = (kwargs_track..., abstol=abstol_UT)
         end
@@ -396,7 +397,7 @@ struct FloquetBasis{
             fb.abstol_UT,
             fb.reltol_UT,
             params,
-            fb.kwargs,
+            (; kwargs...),
         )
     end
 end
