@@ -9,6 +9,24 @@ function _to_period_interval(tlist::AbstractVector, T::Real)
     return tlist
 end
 
+# Leakage out of the subspace spanned by `basis_states` is handled according to
+# `if_leak`: `:warn`, `:error` or `:ignore`.
+const _IF_LEAK_OPTIONS = (:warn, :error, :ignore)
+
+function _check_if_leak(if_leak::Symbol)
+    if_leak in _IF_LEAK_OPTIONS ||
+        throw(ArgumentError("`if_leak` must be one of `:warn`, `:error` or `:ignore`, got `:$if_leak`"))
+    return if_leak
+end
+
+function _handle_leakage(leak::Real, leakage_threshold::Real, if_leak::Symbol, msg::String)
+    if if_leak != :ignore && leak >= leakage_threshold
+        msg *= " Leakage $leak exceeds `leakage_threshold = $leakage_threshold`."
+        if_leak == :error ? throw(ErrorException(msg)) : @warn msg
+    end
+    return nothing
+end
+
 # Propagators of a Hamiltonian `H` (not of a FloquetBasis), used to build Floquet bases.
 
 function _basis_prob_func(prob, i, repeat, u0s)
@@ -29,7 +47,7 @@ end
 # of V the `basis_states`.
 #
 # The probability `1 - Σ_l |⟨l|U(t)|r⟩|²` that basis state `r` leaves the
-# subspace is checked against `leakage_limit` at every saved time, and
+# subspace is checked against `leakage_threshold` at every saved time, and
 # `if_leak` (`:warn`, `:error` or `:ignore`) sets what happens when it is
 # exceeded.
 function _propagator(
@@ -38,14 +56,15 @@ function _propagator(
     tlist::AbstractVector{<:Real};
     params = NullParameters(),
     alg::AbstractODEAlgorithm = Vern7(lazy = false),
-    leakage_limit::Real = 1e-3,
+    leakage_threshold::Real = 1e-3,
     if_leak::Symbol = :warn,
     use_threads::Bool = false,
     progress_bar::Union{Val, Bool} = Val(false),
+    integrate_columns::Bool = true, # basis states are always integrated separately
     kwargs...,
     )
-    if_leak in (:warn, :error, :ignore) ||
-        throw(ArgumentError("`if_leak` must be one of `:warn`, `:error` or `:ignore`, got `:$if_leak`"))
+    integrate_columns || throw(ArgumentError("`basis_states` requires `integrate_columns = true`"))
+    _check_if_leak(if_leak)
     isempty(basis_states) && throw(ArgumentError("`basis_states` must not be empty"))
     basis_states = map(to_dense, basis_states)
     V = reduce(hcat, [ψ.data for ψ in basis_states]) # N×k
@@ -77,10 +96,7 @@ function _propagator(
     end
     if if_leak != :ignore
         leak = maximum(1 - minimum(sum(abs2, U; dims = 1)) for U in Ulist)
-        if leak >= leakage_limit
-            msg = "Maximum leakage $leak out of the $k-state subspace exceeds `leakage_limit = $leakage_limit`."
-            if_leak == :error ? throw(ErrorException(msg)) : @warn msg
-        end
+        _handle_leakage(leak, leakage_threshold, if_leak, "Maximum leakage out of the $k-state subspace within one integration.")
     end
     # embed in the full space, keeping the (possibly composite) dimensions of `H`
     return [Qobj(V * U * V'; dims = H.dims) for U in Ulist]
@@ -122,7 +138,7 @@ function _propagator(
         return _propagator(H, columns, tlist; params = params, progress_bar = progress_bar, kwargs...)
     end
     # drop options that only apply to column integration
-    kwargs = Base.structdiff(values(kwargs), NamedTuple{(:use_threads, :leakage_limit, :if_leak)})
+    kwargs = Base.structdiff(values(kwargs), NamedTuple{(:use_threads, :leakage_threshold, :if_leak)})
     return sesolve(
         H,
         qeye_like(H, Val(true)),
@@ -134,13 +150,40 @@ function _propagator(
 end
 
 
+# Eigendecomposition of the period propagator `U_T`. If the columns of `V` span
+# the subspace `U_T` was computed in, `U_T` acts as zero outside it, and only the
+# eigenvectors `x` lying in the subspace (`norm(V' * x) ≈ 1`) are physical
+# Floquet modes. The remaining eigenvectors (`V' * x ≈ 0`) have eigenvalue 0.
+function _physical_eigen(U_T::AbstractQuantumObject, V::Union{Nothing, AbstractMatrix})
+    vals, kets, vecs = eigenstates(U_T)
+    isnothing(V) && return vals, kets, vecs
+    keep = [norm(V' * x) / norm(x) > 0.5 for x in eachcol(vecs)]
+    k = size(V, 2)
+    if count(keep) != k
+        throw(
+            ErrorException(
+                "Found $(count(keep)) Floquet modes in the $k-dimensional subspace spanned by " *
+                "`basis_states`, expected $k. Leakage out of the subspace may be too large."
+            )
+        )
+    end
+    return vals[keep], kets[keep], vecs[:, keep]
+end
+
+# Dual basis to the Floquet modes `U0`, such that `U0_dual' * U0 = I`. The modes
+# need not be orthonormal, since `U_T` need not be unitary.
+function _dual_basis(U0::AbstractMatrix, V::Union{Nothing, AbstractMatrix})
+    return isnothing(V) ? Matrix(inv(U0)') : V * inv(V' * U0)'
+end
+
 function quasienergy_sort(
     U_T::AbstractQuantumObject,
     T::Real;
     track::Union{Nothing, NamedTuple}=nothing,
+    V::Union{Nothing, AbstractMatrix}=nothing,
     )
     # uns for unsorted
-    ens, ψfl0_uns, U0_uns = eigenstates(U_T)
+    ens, ψfl0_uns, U0_uns = _physical_eigen(U_T, V)
     ε_uns = -angle.(ens) ./ T
     if isnothing(track)
         # sort by quasienergy in the first Floquet zone
@@ -154,7 +197,7 @@ function quasienergy_sort(
     end
     ψfl0 = ψfl0_uns[P]
     U0 = U0_uns[:, P]
-    return ε, ψfl0, U0
+    return ε, ψfl0, U0, ens[P]
 end
 
 function _greedy_assignment(O::AbstractMatrix{<:Real})
@@ -198,11 +241,12 @@ is continuous in ``\lambda``, starting from the eigenvalues of ``\hat{H}_0``.
 - `params`: Parameters passed to the coefficient functions `f_k`.
 - `min_overlap`: A warning is raised if any matched overlap in a step is below this value, which indicates that `δλ` should be decreased.
 - `integrate_columns`: If `true` (default), propagators are computed by integrating each column of the identity separately, otherwise by integrating the identity as a single matrix.
-- `alg`, `reltol`, `kwargs`: Passed to [`sesolve`](@ref) when computing the period propagators.
+- `basis_states`: If given, orthonormal kets spanning the subspace in which the propagators are computed (requires `integrate_columns=true`). Only the Floquet modes in this subspace are tracked, starting from the eigenstates of `H0` projected onto it.
+- `alg`, `reltol`, `kwargs`: Passed to [`sesolve`](@ref) when computing the period propagators, including `leakage_threshold` and `if_leak` for the leakage check within one period.
 
 # Returns:
 A `NamedTuple` with fields
-- `equasi`: Unfolded quasienergies at ``\lambda = 1``, where `equasi[i]` is connected to the `i`-th eigenvalue of `H0` (ascending order).
+- `equasi`: Unfolded quasienergies at ``\lambda = 1``, where `equasi[i]` is connected to the `i`-th eigenvalue of `H0` (ascending order), restricted to the subspace if `basis_states` is given.
 - `U0`: Matrix whose `i`-th column is the corresponding Floquet state at ``t = 0``.
 - `λs`: The values of ``\lambda`` used.
 - `equasi_branches`: Matrix whose `(i, k)` entry is the `i`-th quasienergy at `λs[k]`.
@@ -218,20 +262,31 @@ function track_quasienergies(;
                              alg::AbstractODEAlgorithm=Vern7(lazy=false),
                              reltol::Real=1e-12,
                              integrate_columns::Bool=true,
+                             basis_states::Union{Nothing, AbstractVector{<:QuantumObject{Ket}}}=nothing,
                              kwargs...
                              ) where {PP}
     T > 0 || throw(ArgumentError("`T` must be a nonzero positive real number"))
     nT >= 1 || throw(ArgumentError("`nT` must be a positive integer"))
     0 < δλ <= 1 || throw(ArgumentError("`δλ` must lie in the interval (0, 1]"))
     isempty(H_dr) && throw(ArgumentError("`H_dr` must contain at least one drive term"))
+    if !isnothing(basis_states) && !integrate_columns
+        throw(ArgumentError("`basis_states` requires `integrate_columns = true`"))
+    end
+    V = isnothing(basis_states) ? nothing : _basis_matrix(basis_states)
     # always end the ramp at λ = 1
     λs = range(0.0, 1.0, length=ceil(Int, 1 / δλ - sqrt(eps())) + 1)
     # sample nT times in [0, T), plus T for the period propagator
     tlist = range(0.0, Float64(T), length=nT + 1)
     # λ = 0: use the eigenstates of H0 directly, since U(T) is degenerate for
     # static energies that differ by a multiple of 2π/T
-    E, _, V0 = eigenstates(H0)
-    E = real.(E)
+    if isnothing(V)
+        E, _, V0 = eigenstates(H0)
+        E = real.(E)
+    else
+        # eigenstates of H0 projected onto the subspace
+        F = eigen(Hermitian(V' * to_dense(H0).data * V))
+        E, V0 = F.values, V * F.vectors
+    end
     P = sortperm(E)
     εref = E[P]
     Ψref = V0[:, P]
@@ -242,9 +297,9 @@ function track_quasienergies(;
 
     for (k, λ) in enumerate(λs[2:end])
         H_λ = QobjEvo(Tuple((H_int, (p, t) -> λ * dr(p, t)) for (dr, H_int) in H_dr))
+        prop_args = isnothing(basis_states) ? (H0 + H_λ, tlist) : (H0 + H_λ, basis_states, tlist)
         Us = _propagator(
-            H0 + H_λ,
-            tlist;
+            prop_args...;
             integrate_columns=integrate_columns,
             params=params,
             alg=alg,
@@ -252,10 +307,10 @@ function track_quasienergies(;
             kwargs...,
             progress_bar=Val(false), # after kwargs so it cannot be overridden
         )
-        vals, _, V = eigenstates(Us[end])
+        vals, _, U0 = _physical_eigen(Us[end], V)
         ε = -angle.(vals) ./ T
         # Floquet states at the sampled times
-        Ψ_t = [U.data * V for U in Us[1:nT]]
+        Ψ_t = [U.data * U0 for U in Us[1:nT]]
         # period-averaged overlap O[i, j] with the states of the previous step
         O = sum(abs2.(Ψr' * Ψ) for (Ψr, Ψ) in zip(Ψref_t, Ψ_t)) ./ nT
         P = _greedy_assignment(O)
@@ -265,7 +320,7 @@ function track_quasienergies(;
                 "`min_overlap = $min_overlap`. The labelling may be unreliable; consider decreasing `δλ`."
         end
         εref = _unfold_quasienergies(ε[P], εref, T)
-        Ψref = V[:, P]
+        Ψref = U0[:, P]
         Ψref_t = [Ψ[:, P] for Ψ in Ψ_t]
         ε_branches[:, k + 1] = εref
     end
@@ -286,6 +341,11 @@ function qeye_like(A::QuantumObject, ::Val{T}) where {T}
 end
 
 
+
+# matrix whose columns are the kets in `basis_states`
+function _basis_matrix(basis_states::AbstractVector{<:QuantumObject{Ket}})
+    return Matrix{ComplexF64}(reduce(hcat, [to_dense(ψ).data for ψ in basis_states]))
+end
 
 function _data_to_ketlist(M::AbstractMatrix, dims::DT) where {DT<:AbstractVector{Int}}
     M_list = eachcol(M) |> collect
@@ -338,6 +398,11 @@ Julia struct containing propagators, quasienergies, and Floquet states for a sys
 - `equasi::TE`: Time-independent quasienergies
 - `params::AbstractVector` : Additional parameters for the time-dependent Hamiltonian to be used in sesolve.
 - `integrate_columns::Bool`: Whether propagators are computed by integrating each column of the identity separately (`true`) or the identity as a single matrix (`false`).
+- `U0_dual::Matrix`: Dual basis to the Floquet modes `U0`, such that `U0_dual' * U0 = I`. The modes need not be orthonormal, since propagators restricted to a subspace need not be unitary.
+- `multipliers::Vector`: Floquet multipliers, the eigenvalues ``\lambda_j`` of `U_T` for each Floquet mode, with ``|\lambda_j| \leq 1``. ``1 - |\lambda_j|^2`` is the leakage of mode `j` out of the subspace over one period.
+- `V::Union{Nothing, Matrix}`: Matrix whose columns are the `basis_states` spanning the subspace in which propagators are computed, or `nothing` if the full space is used.
+- `leakage_threshold::Float64`: Default threshold on the leakage ``1 - \mathrm{tr}(U_T^n U_T^{n\dagger}) / k`` out of the ``k``-dimensional subspace over ``n`` periods, and on the leakage of each basis state within one period.
+- `if_leak::Symbol`: Default action when the leakage exceeds `leakage_threshold`: `:warn`, `:error` or `:ignore`.
 """
 struct FloquetBasis{
     TQ<:AbstractQuantumObject,
@@ -358,6 +423,11 @@ struct FloquetBasis{
     abstol_UT::Float64
     reltol_UT::Float64
     integrate_columns::Bool
+    U0_dual::Matrix{TZ}
+    multipliers::Vector{ComplexF64}
+    V::Union{Nothing, Matrix{ComplexF64}}
+    leakage_threshold::Float64
+    if_leak::Symbol
     params::PP
     kwargs::NamedTuple
 
@@ -371,6 +441,9 @@ struct FloquetBasis{
         - `T`: Hamiltonian period such that ``\hat{H}(T+\tau_0) = \hat{H}(\tau_0)``.
         - `precompute`: Time vector containing points ``t`` at which to store the system propagator ``U(t)``.
         - `integrate_columns`: If `true` (default), propagators are computed by integrating each column of the identity separately, otherwise by integrating the identity as a single matrix. Also used for micromotion propagators computed later.
+        - `basis_states`: If given, orthonormal kets spanning the subspace in which propagators are computed, by integrating each of them separately (requires `integrate_columns=true`). Only the `k = length(basis_states)` Floquet modes in this subspace are kept, and propagators need not be unitary.
+        - `leakage_threshold`: Default threshold on the leakage out of the subspace, see [`FloquetBasis`](@ref). Can be overridden in calls that evolve over multiple periods.
+        - `if_leak`: Default action when the leakage exceeds `leakage_threshold`: `:warn` (default), `:error` or `:ignore`.
         - `kwargs`: Additional keyword arguments to pass to ssesolve.
 
         # Notes:
@@ -390,6 +463,9 @@ struct FloquetBasis{
         tidyup_UT::Bool=true, # set noise floor of period-propagator at abstol of solver
         tidyup_micromotion::Bool=false, # set noise floor of micromotion operators at abstol of solver
         integrate_columns::Bool=true, # integrate identity columns separately rather than the full identity
+        basis_states::Union{Nothing, AbstractVector{<:QuantumObject{Ket}}}=nothing, # subspace to propagate in
+        leakage_threshold::Real=1e-3, # default threshold on leakage out of the subspace
+        if_leak::Symbol=:warn, # default action when the leakage threshold is exceeded
         kwargs...
         ) where {PP}
         kwargs = (; kwargs...)
@@ -398,6 +474,14 @@ struct FloquetBasis{
                 ArgumentError("`T` must be a nonzero positive real number")
             )
         end
+        _check_if_leak(if_leak)
+        if !isnothing(basis_states)
+            integrate_columns ||
+                throw(ArgumentError("`basis_states` requires `integrate_columns = true`"))
+            all(ψ -> ψ.dims == H.dims, basis_states) ||
+                throw(ArgumentError("`basis_states` must have the same dimensions as `H`"))
+        end
+        V = isnothing(basis_states) ? nothing : _basis_matrix(basis_states)
         precompute = isnothing(precompute) ? Float64[] : Float64.(precompute)
         T = Float64(T)
         # enforce `precompute` interval rule
@@ -414,12 +498,14 @@ struct FloquetBasis{
         end
         abstol = Float64(get(kwargs_UT, :abstol, DEFAULT_ODE_SOLVER_OPTIONS.abstol))
         # compute propagators
+        prop_args = isnothing(basis_states) ? (H, tlist) : (H, basis_states, tlist)
         states = _propagator(
-            H,
-            tlist;
+            prop_args...;
             integrate_columns=integrate_columns,
             params=params,
             alg=alg,
+            leakage_threshold=leakage_threshold,
+            if_leak=if_leak,
             kwargs_UT...
                 )
         Ulist = states[2:end-1] # don't put t=0 or t=T in micromotion cache
@@ -432,7 +518,8 @@ struct FloquetBasis{
             tidyup!.(Ulist, abstol)
         end
         # solve for quasienergies
-        equasi, ψfl0, U0 = quasienergy_sort(U_T, T)
+        equasi, ψfl0, U0, multipliers = quasienergy_sort(U_T, T; V=V)
+        U0_dual = _dual_basis(U0, V)
         TQ, TS, TA, TZ = eltype(Ulist), eltype(ψfl0), typeof(alg), eltype(U0)
 
         new{TQ, TS, TA, TZ, PP}(
@@ -448,6 +535,11 @@ struct FloquetBasis{
             abstol,
             Float64(reltol_UT),
             integrate_columns,
+            U0_dual,
+            multipliers,
+            V,
+            Float64(leakage_threshold),
+            if_leak,
             params,
             kwargs,
         )
@@ -465,6 +557,8 @@ struct FloquetBasis{
     - `T`: Drive period.
     - `precompute`: Time vector containing points ``t`` at which to store the system propagator ``U(t)``.
     - `integrate_columns`: If `true` (default), propagators are computed by integrating each column of the identity separately, otherwise by integrating the identity as a single matrix. Used for the period propagator, the drive-strength ramp, and micromotion propagators computed later.
+    - `n_basis_states`: If given, propagators are computed in the subspace spanned by the first `n_basis_states` eigenstates of `H0`, in the order returned by the eigensolver. Alternatively, `basis_states` can be given directly, as for `FloquetBasis(H, T, precompute)`.
+    - `leakage_threshold`, `if_leak`: Default leakage threshold and action, see `FloquetBasis(H, T, precompute)`.
     - `δλ`, `nT`, `min_overlap`: Options for the drive-strength ramp, see [`track_quasienergies`](@ref). The default `δλ=1` assigns each Floquet state to the static eigenstate with which it has maximal overlap, which is sufficient for weak drives.
     - `kwargs`: Remaining keyword arguments are the same as for `FloquetBasis(H, T, precompute)`, and are also used when computing the propagators of the ramp.
 
@@ -484,9 +578,21 @@ struct FloquetBasis{
         reltol_UT::Real=1e-12,
         abstol_UT::Union{Real, Nothing}=nothing,
         integrate_columns::Bool=true,
+        n_basis_states::Union{Int, Nothing}=nothing,
+        basis_states::Union{Nothing, AbstractVector{<:QuantumObject{Ket}}}=nothing,
+        leakage_threshold::Real=1e-3,
+        if_leak::Symbol=:warn,
         kwargs...
         ) where {PP}
         H = H0 + QobjEvo(Tuple((H_k, f_k) for (f_k, H_k) in H_dr))
+        if !isnothing(n_basis_states)
+            isnothing(basis_states) ||
+                throw(ArgumentError("Only one of `n_basis_states` and `basis_states` can be given"))
+            _, H0_states, _ = eigenstates(H0)
+            1 <= n_basis_states <= length(H0_states) ||
+                throw(ArgumentError("`n_basis_states` must lie in 1:$(length(H0_states))"))
+            basis_states = H0_states[1:n_basis_states]
+        end
         fb = FloquetBasis(
             H,
             T,
@@ -496,6 +602,9 @@ struct FloquetBasis{
             reltol_UT=reltol_UT,
             abstol_UT=abstol_UT,
             integrate_columns=integrate_columns,
+            basis_states=basis_states,
+            leakage_threshold=leakage_threshold,
+            if_leak=if_leak,
             kwargs...,
             progress_bar=Val(false), # keep tracking quiet, e.g. when run multithreaded
         )
@@ -515,10 +624,14 @@ struct FloquetBasis{
             alg=alg,
             reltol=reltol_UT,
             integrate_columns=integrate_columns,
+            basis_states=basis_states,
+            leakage_threshold=leakage_threshold,
+            if_leak=if_leak,
             kwargs_track...
         )
         # relabel the Floquet states of `fb` by the tracked branches
-        equasi, ψfl0, U0 = quasienergy_sort(fb.U_T, fb.T; track=track)
+        equasi, ψfl0, U0, multipliers = quasienergy_sort(fb.U_T, fb.T; track=track, V=fb.V)
+        U0_dual = _dual_basis(U0, fb.V)
         TQ, TS, TA, TZ = eltype(fb.Ulist), eltype(ψfl0), typeof(fb.alg), eltype(U0)
 
         new{TQ, TS, TA, TZ, PP}(
@@ -534,6 +647,11 @@ struct FloquetBasis{
             fb.abstol_UT,
             fb.reltol_UT,
             fb.integrate_columns,
+            U0_dual,
+            multipliers,
+            fb.V,
+            fb.leakage_threshold,
+            fb.if_leak,
             params,
             (; kwargs...),
         )
@@ -552,6 +670,29 @@ end
 function qeye_like(fb::FloquetBasis)
     return qeye_like(fb.U_T)
 end
+
+# kets spanning the subspace of `fb`, or `nothing` if the full space is used
+function _basis_states(fb::FloquetBasis)
+    return isnothing(fb.V) ? nothing : [Qobj(Vector(c); dims = fb.dims) for c in eachcol(fb.V)]
+end
+
+# dimensions of maps from the Floquet basis to the system (`to_system = true`) or
+# back: the system dimensions if all states are kept, otherwise the k Floquet
+# modes, which have no tensor structure, on the Floquet side
+function _transform_dims(fb::FloquetBasis, to_system::Bool)
+    isnothing(fb.V) && return fb.dims
+    sys, fl = Tuple(fb.dims), (length(fb.equasi),)
+    return to_system ? (sys, fl) : (fl, sys)
+end
+
+# inverse of a propagator `U` on the subspace of `fb`
+function _propagator_inv(fb::FloquetBasis, U::AbstractQuantumObject)
+    M = isnothing(fb.V) ? inv(Matrix(U.data)) : fb.V * inv(fb.V' * U.data * fb.V) * fb.V'
+    return Qobj(M; dims = fb.dims)
+end
+
+# left inverse of the full-column-rank matrix `Φ`, such that `_left_inverse(Φ) * Φ = I`
+_left_inverse(Φ::AbstractMatrix) = (Φ' * Φ) \ Φ'
 
 
 function _init_FloquetEvolutionSol(
@@ -687,6 +828,9 @@ function _compute_micromotion(
     integrate_columns::Bool=fb.integrate_columns,
     kwargs...
     )
+    if !isnothing(fb.V) && !integrate_columns
+        throw(ArgumentError("A FloquetBasis with `basis_states` requires `integrate_columns = true`"))
+    end
     # send tlist to period interval
     # NOTE: order of timesteps may change if any timestep is outside the
     # interval [0,T)
@@ -695,9 +839,9 @@ function _compute_micromotion(
     t0 = trem_list[1]
     solver_t = t0 == zero(t0) ? trem_list : [zero(t0), trem_list...]
     # calculate micromotion propagators
+    prop_args = isnothing(fb.V) ? (fb.H, solver_t) : (fb.H, _basis_states(fb), solver_t)
     U_micros = _propagator(
-        fb.H,
-        solver_t;
+        prop_args...;
         integrate_columns=integrate_columns,
         params=fb.params,
         alg=fb.alg,
@@ -754,34 +898,57 @@ end
 
 function _get_interperiod_prop(
     fb::FloquetBasis,
-    tlist::AbstractVector
+    tlist::AbstractVector;
+    leakage_threshold::Real=fb.leakage_threshold,
+    if_leak::Symbol=fb.if_leak,
     )
     # get period counts for each timestep
-    nT_list = fld.(tlist, fb.T)
-    # avoid repeating matrix exponentiations
+    nT_list = Int.(fld.(tlist, fb.T))
+    # avoid repeating matrix powers
     nT_unq = unique(nT_list)
-    # propagate over periods
-    UnT = map(nT -> fb.U_T^nT, nT_unq)
+    # propagate over periods with the Floquet decomposition
+    # U_T^n = U0 * Λ^n * U0_dual', which also holds for n < 0 on the subspace
+    UnT = map(nT_unq) do n
+        n == 0 ? qeye_like(fb) :
+            Qobj(fb.U0 * Diagonal(fb.multipliers .^ n) * fb.U0_dual'; dims = fb.dims)
+    end
+    # leakage 1 - tr(U_T^n U_T^n') / k out of the k-dimensional subspace
+    if if_leak != :ignore
+        k = length(fb.equasi)
+        leak, n_max = 0.0, 0
+        for (n, U) in zip(nT_unq, UnT)
+            n == 0 && continue
+            l = abs(1 - sum(abs2, U.data) / k)
+            l > leak && ((leak, n_max) = (l, n))
+        end
+        _handle_leakage(leak, leakage_threshold, if_leak, "Leakage out of the $k-dimensional subspace over $n_max periods.")
+    end
     # re-add repeated propagators if needed
-    UnT = nT_list.size == nT_unq.size ? UnT : UnT[indexin(nT_list, nT_unq)]
-    return UnT
+    return UnT[indexin(nT_list, nT_unq)]
 end
 
 function _proplist(
     fb::FloquetBasis,
     tlist::AbstractVector,
     pbar::Bool;# TODO: Change to Val consistent with rest of QT.jl
+    leakage_threshold::Union{Real, Nothing}=nothing,
+    if_leak::Union{Symbol, Nothing}=nothing,
     kwargs...
     )
+    # per-call leakage options override the defaults stored in `fb`
+    leakage_threshold = something(leakage_threshold, fb.leakage_threshold)
+    if_leak = _check_if_leak(something(if_leak, fb.if_leak))
     pbar ? println("Calcuating Micromotion Propagators") : nothing
     Umicro_list, Unew_list, tnew = _get_micromotion(
         fb,
         tlist,
         pbar;
+        leakage_threshold=leakage_threshold,
+        if_leak=if_leak,
         kwargs...
     )
     pbar ? println("Finished.") : nothing
-    UnT_list = _get_interperiod_prop(fb, tlist)
+    UnT_list = _get_interperiod_prop(fb, tlist; leakage_threshold=leakage_threshold, if_leak=if_leak)
     # compute total propagators
     Utot = [Umicro * UnT for (Umicro, UnT) in zip(Umicro_list, UnT_list)]
     return Utot, UnT_list, Umicro_list, Unew_list, tnew
@@ -792,17 +959,25 @@ function propagator(
     fb::FloquetBasis,
     tlist::AbstractVector;
     progress_bar::Bool=false,
+    leakage_threshold::Union{Real, Nothing}=nothing,
+    if_leak::Union{Symbol, Nothing}=nothing,
     kwargs...)
-    return _proplist(fb, tlist, progress_bar; kwargs...)[1]
+    return _proplist(
+        fb, tlist, progress_bar; leakage_threshold=leakage_threshold, if_leak=if_leak, kwargs...
+    )[1]
 end
 
 function propagator!(
     fb::FloquetBasis,
     tlist::AbstractVector;
     progress_bar::Bool=false,
+    leakage_threshold::Union{Real, Nothing}=nothing,
+    if_leak::Union{Symbol, Nothing}=nothing,
     kwargs...
     )
-    Ulist, _, _, Unew, tnew = _proplist(fb, tlist, progress_bar; kwargs...)
+    Ulist, _, _, Unew, tnew = _proplist(
+        fb, tlist, progress_bar; leakage_threshold=leakage_threshold, if_leak=if_leak, kwargs...
+    )
     if !isempty(tnew)
         memoize_micromotion!(fb, tnew, Unew)
     end
@@ -824,8 +999,8 @@ function propagator(fb::FloquetBasis, t0::Real, tf::Real; kwargs...)
         return Ulist[end]
     else
         # Ulist contains propagators [U(0, t0), U(0, tf)]
-        # Return U(t0, tf) = U(0, tf) * U'(0, t0)
-        return Ulist[end] * Ulist[1]'
+        # Return U(t0, tf) = U(0, tf) * U(0, t0)^-1, inverting on the subspace
+        return Ulist[end] * _propagator_inv(fb, Ulist[1])
     end
 end
 
@@ -835,8 +1010,8 @@ function propagator!(fb::FloquetBasis, t0::Real, tf::Real; kwargs...)
         return Ulist[end]
     else
         # Ulist contains propagators [U(0, t0), U(0, tf)]
-        # Return U(t0, tf) = U(0, tf) * U'(0, t0)
-        return Ulist[end] * Ulist[1]'
+        # Return U(t0, tf) = U(0, tf) * U(0, t0)^-1, inverting on the subspace
+        return Ulist[end] * _propagator_inv(fb, Ulist[1])
     end
 end
 #
@@ -916,10 +1091,15 @@ function fsesolve(
     ψ0::QuantumObject{Ket},
     tlist::AbstractVector{TS},
     e_ops::Union{Nothing, AbstractVector, Tuple} = nothing,
-    progress_bar::Union{Val, Bool} = Val(true),
+    progress_bar::Union{Val, Bool} = Val(true);
+    leakage_threshold::Union{Real, Nothing} = nothing,
+    if_leak::Union{Symbol, Nothing} = nothing,
     kwargs...,
 ) where {TS<:Real}
-    return _fsesolve(fb, ψ0, tlist, propagator, e_ops, progress_bar; kwargs...)
+    return _fsesolve(
+        fb, ψ0, tlist, propagator, e_ops, progress_bar;
+        leakage_threshold=leakage_threshold, if_leak=if_leak, kwargs...
+    )
 end
 
 
@@ -928,10 +1108,15 @@ function fsesolve!(
     ψ0::QuantumObject{Ket},
     tlist::AbstractVector{TS},
     e_ops::Union{Nothing, AbstractVector, Tuple} = nothing,
-    progress_bar::Union{Val, Bool} = Val(true),
+    progress_bar::Union{Val, Bool} = Val(true);
+    leakage_threshold::Union{Real, Nothing} = nothing,
+    if_leak::Union{Symbol, Nothing} = nothing,
     kwargs...,
 ) where {TS<:Real}
-    return _fsesolve(fb, ψ0, tlist, propagator!, e_ops, progress_bar; kwargs...)
+    return _fsesolve(
+        fb, ψ0, tlist, propagator!, e_ops, progress_bar;
+        leakage_threshold=leakage_threshold, if_leak=if_leak, kwargs...
+    )
 end
 
 
@@ -947,15 +1132,17 @@ function _fsesolve(
     sol = _init_FloquetEvolutionSol(
         fb,
         tlist,
-        e_ops,
+        e_ops;
         kwargs...
     )
     # convert progress_bar to boolean type
     if !(progress_bar isa Bool)
         progress_bar = typeof(progress_bar).parameters[1]
     end
-    # get propagators
-    Ulist = pfunc(fb, tlist; progress_bar=progress_bar, kwargs...)
+    # get propagators; `saveat` only selects the stored states, and must not
+    # reach the integration of micromotion propagators
+    prop_kwargs = Base.structdiff(values(kwargs), NamedTuple{(:saveat,)})
+    Ulist = pfunc(fb, tlist; progress_bar=progress_bar, prop_kwargs...)
     # get indices of timesteps at which to store state
     state_idxs = indexin(tlist, sol.times_states)
 
@@ -1157,7 +1344,7 @@ function from_floquet_basis(
     )
     bfunc = mode_basis ? modes : states
     return bfunc(fb, t, Val(true); kwargs...) |>
-        U -> Qobj(U, dims=fb.dims)
+        U -> Qobj(U, dims=_transform_dims(fb, true))
 end
 
 function from_floquet_basis(
@@ -1178,12 +1365,9 @@ function to_floquet_basis(
     mode_basis::Bool=false,
     kwargs...
     )
-    # to is just adjoint of from
-    return from_floquet_basis(fb,
-                              t,
-                              Val(false);
-                              mode_basis=mode_basis,
-                              kwargs...)'
+    # to is the left inverse of from, which is not unitary on a subspace
+    return to_floquet_basis(fb, t, Val(true); mode_basis=mode_basis, kwargs...) |>
+        U -> Qobj(U, dims=_transform_dims(fb, false))
 end
 
 function to_floquet_basis(
@@ -1192,12 +1376,12 @@ function to_floquet_basis(
     ::Val{true};
     mode_basis::Bool=false,
     kwargs...)
-    # to is just adjoint of from
+    # to is the left inverse of from, which is not unitary on a subspace
     return from_floquet_basis(fb,
                               t,
                               Val(true);
                               mode_basis=mode_basis,
-                              kwargs...)'
+                              kwargs...) |> _left_inverse
 end
 
 # with micromotion operator caching
@@ -1211,7 +1395,7 @@ function from_floquet_basis!(
     )
     bfunc = mode_basis ? modes! : states!
     return bfunc(fb, t, Val(true); kwargs...) |>
-        U -> Qobj(U, dims=fb.dims)
+        U -> Qobj(U, dims=_transform_dims(fb, true))
 end
 
 function from_floquet_basis!(
@@ -1232,12 +1416,9 @@ function to_floquet_basis!(
     mode_basis::Bool=false,
     kwargs...
     )
-    # to is just adjoint of from
-    return from_floquet_basis!(fb,
-                              t,
-                              Val(false);
-                              mode_basis=mode_basis,
-                              kwargs...)'
+    # to is the left inverse of from, which is not unitary on a subspace
+    return to_floquet_basis!(fb, t, Val(true); mode_basis=mode_basis, kwargs...) |>
+        U -> Qobj(U, dims=_transform_dims(fb, false))
 end
 
 function to_floquet_basis!(
@@ -1246,12 +1427,12 @@ function to_floquet_basis!(
     ::Val{true};
     mode_basis::Bool=false,
     kwargs...)
-    # to is just adjoint of from
+    # to is the left inverse of from, which is not unitary on a subspace
     return from_floquet_basis!(fb,
                               t,
                               Val(true);
                               mode_basis=mode_basis,
-                              kwargs...)'
+                              kwargs...) |> _left_inverse
 end
 
 
