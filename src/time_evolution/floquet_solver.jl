@@ -9,6 +9,131 @@ function _to_period_interval(tlist::AbstractVector, T::Real)
     return tlist
 end
 
+# Propagators of a Hamiltonian `H` (not of a FloquetBasis), used to build Floquet bases.
+
+function _basis_prob_func(prob, i, repeat, u0s)
+    # same as `_se_me_map_prob_func`, but only the initial state changes between
+    # trajectories, so the coefficient functions receive `params` unchanged
+    f = deepcopy(prob.f.f)
+    if haskey(prob.kwargs, :callback)
+        return remake(prob, f = f, u0 = u0s[i], callback = deepcopy(prob.kwargs[:callback]))
+    else
+        return remake(prob, f = f, u0 = u0s[i])
+    end
+end
+
+# Propagator of `H` restricted to the subspace spanned by the orthonormal kets
+# `basis_states`, obtained by integrating each basis state separately. Returns a
+# vector of operators in the full space of `H` (keeping its dimensions), one per
+# saved time, given by V * U(t) * V' with U(t)[l, r] = ⟨l|U(t)|r⟩ and the columns
+# of V the `basis_states`.
+#
+# The probability `1 - Σ_l |⟨l|U(t)|r⟩|²` that basis state `r` leaves the
+# subspace is checked against `leakage_limit` at every saved time, and
+# `if_leak` (`:warn`, `:error` or `:ignore`) sets what happens when it is
+# exceeded.
+function _propagator(
+    H::AbstractQuantumObject,
+    basis_states::AbstractVector{<:QuantumObject{Ket}},
+    tlist::AbstractVector{<:Real};
+    params = NullParameters(),
+    alg::AbstractODEAlgorithm = Vern7(lazy = false),
+    leakage_limit::Real = 1e-3,
+    if_leak::Symbol = :warn,
+    use_threads::Bool = false,
+    progress_bar::Union{Val, Bool} = Val(false),
+    kwargs...,
+    )
+    if_leak in (:warn, :error, :ignore) ||
+        throw(ArgumentError("`if_leak` must be one of `:warn`, `:error` or `:ignore`, got `:$if_leak`"))
+    isempty(basis_states) && throw(ArgumentError("`basis_states` must not be empty"))
+    basis_states = map(to_dense, basis_states)
+    V = reduce(hcat, [ψ.data for ψ in basis_states]) # N×k
+    k = size(V, 2)
+    if norm(V' * V - I) > k * sqrt(eps())
+        throw(ArgumentError("`basis_states` must be orthonormal"))
+    end
+    # integrate each basis state, in parallel if `use_threads`
+    prob = sesolveProblem(
+        H,
+        first(basis_states),
+        tlist;
+        params = params,
+        progress_bar = Val(false),
+        kwargs...,
+    )
+    u0s = [to_dense(_complex_float_type(eltype(ψ)), copy(ψ.data)) for ψ in basis_states]
+    sols = sesolve_map(
+        prob,
+        u0s,
+        alg,
+        use_threads ? EnsembleThreads() : EnsembleSerial();
+        prob_func = (prob, i, repeat) -> _basis_prob_func(prob, i, repeat, u0s),
+        progress_bar = makeVal(progress_bar),
+    )
+    # U[l, r] = ⟨l|U(t)|r⟩ at each saved time
+    Ulist = map(eachindex(first(sols).states)) do n
+        V' * reduce(hcat, [sol.states[n].data for sol in sols])
+    end
+    if if_leak != :ignore
+        leak = maximum(1 - minimum(sum(abs2, U; dims = 1)) for U in Ulist)
+        if leak >= leakage_limit
+            msg = "Maximum leakage $leak out of the $k-state subspace exceeds `leakage_limit = $leakage_limit`."
+            if_leak == :error ? throw(ErrorException(msg)) : @warn msg
+        end
+    end
+    # embed in the full space, keeping the (possibly composite) dimensions of `H`
+    return [Qobj(V * U * V'; dims = H.dims) for U in Ulist]
+end
+
+# Same as above, with the subspace spanned by the first `n_basis_states`
+# eigenstates of `H0`, in the order returned by the eigensolver (all of them if
+# `n_basis_states` is `nothing`).
+function _propagator(
+    H::AbstractQuantumObject,
+    H0::QuantumObject{Operator},
+    tlist::AbstractVector{<:Real};
+    n_basis_states::Union{Int, Nothing} = nothing,
+    kwargs...,
+    )
+    _, basis_states, _ = eigenstates(H0)
+    if !isnothing(n_basis_states)
+        1 <= n_basis_states <= length(basis_states) ||
+            throw(ArgumentError("`n_basis_states` must lie in 1:$(length(basis_states))"))
+        basis_states = basis_states[1:n_basis_states]
+    end
+    return _propagator(H, basis_states, tlist; kwargs...)
+end
+
+# Propagator of `H` in the full space, obtained by integrating each column of the
+# identity separately if `integrate_columns`, or the identity as a single matrix
+# otherwise.
+function _propagator(
+    H::AbstractQuantumObject,
+    tlist::AbstractVector{<:Real};
+    integrate_columns::Bool = true,
+    params = NullParameters(),
+    progress_bar::Union{Val, Bool} = Val(false),
+    kwargs...,
+    )
+    if integrate_columns
+        N = size(H, 1)
+        columns = [fock(N, j; dims = H.dims) for j in 0:N-1]
+        return _propagator(H, columns, tlist; params = params, progress_bar = progress_bar, kwargs...)
+    end
+    # drop options that only apply to column integration
+    kwargs = Base.structdiff(values(kwargs), NamedTuple{(:use_threads, :leakage_limit, :if_leak)})
+    return sesolve(
+        H,
+        qeye_like(H, Val(true)),
+        tlist;
+        params = params,
+        kwargs...,
+        progress_bar = makeVal(progress_bar),
+    ).states
+end
+
+
 function quasienergy_sort(
     U_T::AbstractQuantumObject,
     T::Real;
@@ -72,6 +197,7 @@ is continuous in ``\lambda``, starting from the eigenvalues of ``\hat{H}_0``.
 - `δλ`: Step in the drive-strength ramp. The default `δλ=1` matches the Floquet states directly to the static eigenstates by maximal overlap, which is sufficient for weak drives.
 - `params`: Parameters passed to the coefficient functions `f_k`.
 - `min_overlap`: A warning is raised if any matched overlap in a step is below this value, which indicates that `δλ` should be decreased.
+- `integrate_columns`: If `true` (default), propagators are computed by integrating each column of the identity separately, otherwise by integrating the identity as a single matrix.
 - `alg`, `reltol`, `kwargs`: Passed to [`sesolve`](@ref) when computing the period propagators.
 
 # Returns:
@@ -91,6 +217,7 @@ function track_quasienergies(;
                              min_overlap::Real=0.5,
                              alg::AbstractODEAlgorithm=Vern7(lazy=false),
                              reltol::Real=1e-12,
+                             integrate_columns::Bool=true,
                              kwargs...
                              ) where {PP}
     T > 0 || throw(ArgumentError("`T` must be a nonzero positive real number"))
@@ -115,16 +242,16 @@ function track_quasienergies(;
 
     for (k, λ) in enumerate(λs[2:end])
         H_λ = QobjEvo(Tuple((H_int, (p, t) -> λ * dr(p, t)) for (dr, H_int) in H_dr))
-        Us = sesolve(
+        Us = _propagator(
             H0 + H_λ,
-            qeye_like(H0),
             tlist;
+            integrate_columns=integrate_columns,
             params=params,
             alg=alg,
             reltol=reltol,
             kwargs...,
             progress_bar=Val(false), # after kwargs so it cannot be overridden
-        ).states
+        )
         vals, _, V = eigenstates(Us[end])
         ε = -angle.(vals) ./ T
         # Floquet states at the sampled times
@@ -210,6 +337,7 @@ Julia struct containing propagators, quasienergies, and Floquet states for a sys
 - `Ulist::AbstractVector{Qobj}`: List of micromotion propagators at times `tlist`
 - `equasi::TE`: Time-independent quasienergies
 - `params::AbstractVector` : Additional parameters for the time-dependent Hamiltonian to be used in sesolve.
+- `integrate_columns::Bool`: Whether propagators are computed by integrating each column of the identity separately (`true`) or the identity as a single matrix (`false`).
 """
 struct FloquetBasis{
     TQ<:AbstractQuantumObject,
@@ -229,6 +357,7 @@ struct FloquetBasis{
     alg::TA
     abstol_UT::Float64
     reltol_UT::Float64
+    integrate_columns::Bool
     params::PP
     kwargs::NamedTuple
 
@@ -241,6 +370,7 @@ struct FloquetBasis{
         - `H`: Time-dependent system Hamiltonian.
         - `T`: Hamiltonian period such that ``\hat{H}(T+\tau_0) = \hat{H}(\tau_0)``.
         - `precompute`: Time vector containing points ``t`` at which to store the system propagator ``U(t)``.
+        - `integrate_columns`: If `true` (default), propagators are computed by integrating each column of the identity separately, otherwise by integrating the identity as a single matrix. Also used for micromotion propagators computed later.
         - `kwargs`: Additional keyword arguments to pass to ssesolve.
 
         # Notes:
@@ -259,6 +389,7 @@ struct FloquetBasis{
         abstol_UT::Union{Real, Nothing}=nothing, # keep error floor at default unless user specifies otherwise
         tidyup_UT::Bool=true, # set noise floor of period-propagator at abstol of solver
         tidyup_micromotion::Bool=false, # set noise floor of micromotion operators at abstol of solver
+        integrate_columns::Bool=true, # integrate identity columns separately rather than the full identity
         kwargs...
         ) where {PP}
         kwargs = (; kwargs...)
@@ -277,31 +408,32 @@ struct FloquetBasis{
         end
         tlist = Float64[0, precompute..., T]
         # assemble integrator kwargs used for propagator
-        kwargs_UT = (kwargs..., saveat=tlist, reltol=reltol_UT)
+        kwargs_UT = (progress_bar=Val(true), kwargs..., saveat=tlist, reltol=reltol_UT)
         if !isnothing(abstol_UT)
             kwargs_UT = (kwargs_UT..., abstol=abstol_UT)
         end
+        abstol = Float64(get(kwargs_UT, :abstol, DEFAULT_ODE_SOLVER_OPTIONS.abstol))
         # compute propagators
-        sol = sesolve(
+        states = _propagator(
             H,
-            qeye_like(H, Val(true)),
             tlist;
+            integrate_columns=integrate_columns,
             params=params,
             alg=alg,
             kwargs_UT...
                 )
-        Ulist = sol.states[2:end-1] # don't put t=0 or t=T in micromotion cache
-        U_T = sol.states[end]
+        Ulist = states[2:end-1] # don't put t=0 or t=T in micromotion cache
+        U_T = states[end]
         # tidyup period-propagator and micromotion propagators according to boolean flags
         if tidyup_UT
-            tidyup!(U_T, sol.abstol)
+            tidyup!(U_T, abstol)
         end
         if tidyup_micromotion
-            tidyup!.(Ulist, sol.abstol)
+            tidyup!.(Ulist, abstol)
         end
         # solve for quasienergies
         equasi, ψfl0, U0 = quasienergy_sort(U_T, T)
-        TQ, TS, TA, TZ = eltype(Ulist), eltype(ψfl0), typeof(sol.alg), eltype(U0)
+        TQ, TS, TA, TZ = eltype(Ulist), eltype(ψfl0), typeof(alg), eltype(U0)
 
         new{TQ, TS, TA, TZ, PP}(
             H,
@@ -312,9 +444,10 @@ struct FloquetBasis{
             U0,
             Ulist,
             equasi,
-            sol.alg,
-            sol.abstol,
-            sol.reltol,
+            alg,
+            abstol,
+            Float64(reltol_UT),
+            integrate_columns,
             params,
             kwargs,
         )
@@ -331,6 +464,7 @@ struct FloquetBasis{
     - `H_dr`: Vector of drive terms `(f_k, H_k)`, with coefficient functions `f_k(p, t)`.
     - `T`: Drive period.
     - `precompute`: Time vector containing points ``t`` at which to store the system propagator ``U(t)``.
+    - `integrate_columns`: If `true` (default), propagators are computed by integrating each column of the identity separately, otherwise by integrating the identity as a single matrix. Used for the period propagator, the drive-strength ramp, and micromotion propagators computed later.
     - `δλ`, `nT`, `min_overlap`: Options for the drive-strength ramp, see [`track_quasienergies`](@ref). The default `δλ=1` assigns each Floquet state to the static eigenstate with which it has maximal overlap, which is sufficient for weak drives.
     - `kwargs`: Remaining keyword arguments are the same as for `FloquetBasis(H, T, precompute)`, and are also used when computing the propagators of the ramp.
 
@@ -349,6 +483,7 @@ struct FloquetBasis{
         alg::AbstractODEAlgorithm = Vern7(lazy = false),
         reltol_UT::Real=1e-12,
         abstol_UT::Union{Real, Nothing}=nothing,
+        integrate_columns::Bool=true,
         kwargs...
         ) where {PP}
         H = H0 + QobjEvo(Tuple((H_k, f_k) for (f_k, H_k) in H_dr))
@@ -360,6 +495,7 @@ struct FloquetBasis{
             alg=alg,
             reltol_UT=reltol_UT,
             abstol_UT=abstol_UT,
+            integrate_columns=integrate_columns,
             kwargs...,
             progress_bar=Val(false), # keep tracking quiet, e.g. when run multithreaded
         )
@@ -378,6 +514,7 @@ struct FloquetBasis{
             min_overlap=min_overlap,
             alg=alg,
             reltol=reltol_UT,
+            integrate_columns=integrate_columns,
             kwargs_track...
         )
         # relabel the Floquet states of `fb` by the tracked branches
@@ -396,6 +533,7 @@ struct FloquetBasis{
             fb.alg,
             fb.abstol_UT,
             fb.reltol_UT,
+            fb.integrate_columns,
             params,
             (; kwargs...),
         )
@@ -546,6 +684,7 @@ function _compute_micromotion(
     fb::FloquetBasis,
     tlist::AbstractVector,
     pbar::Bool;
+    integrate_columns::Bool=fb.integrate_columns,
     kwargs...
     )
     # send tlist to period interval
@@ -556,14 +695,15 @@ function _compute_micromotion(
     t0 = trem_list[1]
     solver_t = t0 == zero(t0) ? trem_list : [zero(t0), trem_list...]
     # calculate micromotion propagators
-    U_micros = sesolve(
+    U_micros = _propagator(
         fb.H,
-        qeye_like(fb),
         solver_t;
+        integrate_columns=integrate_columns,
+        params=fb.params,
         alg=fb.alg,
-        progress_bar=Val(pbar),
+        progress_bar=pbar,
         kwargs...
-    ).states
+    )
     # remove zero timestep if it was added
     if t0 != zero(t0)
         popfirst!(U_micros)
